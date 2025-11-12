@@ -1,11 +1,11 @@
 #include "lf_rintintin.h"
 #include "fx/gltf.h"
-
+        
 using namespace fx::gltf::detail;
 #define ReadField(x) ReadRequiredField(#x, json, db.x)
 #define ReadOptField(x) ReadOptionalField(#x, json, db.x)
 
-#define WriteReqField(x) WriteRequiredField(#x, json, db.x)
+#define WriteReqField(x) (json[#x] = db.x)
 #define Write_Field(x) WriteField(#x, json, db.x)
 #define WriteOptField(x, y) WriteField(#x, json, db.x, y)
 

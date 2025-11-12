@@ -1,13 +1,37 @@
 #include "tonton_fxgltf_memo.h"
 #include "../modules/dodeedum/extensions/dodeedum_fxgltf_bridge.h"
 #include "fx/gltf.h"
-#include "fx/extensions/extensionsandextras.h"
 #include "../include/tonton_input.h"
-#include "gltf_rintintin_bridge/gltf_rintintin_bridge.h"
+#include "gltf_rintintin_bridge.h"
+#include "lf_rintintin.h"
 #include <glm/gtx/matrix_decompose.hpp>
 
 using GLTFAttributeData = RTT::GLTFAttributeData;
 
+namespace LF { void from_json(nlohmann::json const& json, Rintintin & db); }
+	
+static std::string GetCapability(fx::gltf::Document const* doc, uint32_t i)
+{	
+	auto * json = &doc->nodes[i].extensionsAndExtras;
+	auto itr = json->find("extras");
+	if(itr == json->end())
+		return {};
+		
+	auto itr2 = itr->find("capability");
+	if(itr2 == itr->end())
+		return {};
+		
+	try
+	{
+		return itr2->get<std::string>();
+	}
+	catch(...)
+	{
+		return {};
+	}
+};
+	
+	
 TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_file) :
 	_doc(std::move(document_file)) 
 {
@@ -21,8 +45,31 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 		meshes[i] = TonTon::Mesh::Factory(DoDeeDum::GetMesh(*_doc, i));
 	}
 	
-	fx::ExtensionsAndExtras ee;
-	ee.Unpack(*_doc);
+	LF::Rintintin rtt;
+	std::string capabilities;
+	
+	auto GetRTTExtension = [&](uint32_t i) -> bool
+	{
+		auto * json = &_doc->nodes[i].extensionsAndExtras;
+		auto itr = json->find("extensions");
+		if(itr == json->end())
+			return false;
+			
+		auto itr2 = itr->find("LF_RINTINTIN");
+		if(itr2 == itr->end())
+			return false;
+			
+		try
+		{
+			rtt = itr2->get<LF::Rintintin>();
+		}
+		catch(...)
+		{
+			return false;
+		}
+		
+		return true;
+	};
 	
 	for(auto i = 0u; i < _doc->nodes.size(); ++i)
 	{
@@ -31,11 +78,11 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 		{
 			auto & sk = _doc->skins[_doc->nodes[i].skin];
 			auto N =  sk.joints.size();
-						
+			
 			if(skins[_doc->nodes[i].skin] == nullptr)
 			{
-				if(ee.nodes.size() && ee.nodes[i].extensions.rintintin.metrics.size() == sk.joints.size())
-					BuildRaw(_doc.get(), i, ee);
+				if(GetRTTExtension(i))
+					BuildRaw(_doc.get(), i);
 				else
 				{
 					std::vector<glm::quat> q(sk.joints.size());
@@ -58,8 +105,7 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 								words.clear();
 								StringToWords(words, cmd.skin.bone_names[j]);
 								
-								if(j < ee.nodes.size())
-									StringToWords(words, ee.nodes[j].extras.capability);
+								StringToWords(words, GetCapability(_doc.get(), j));
 								
 								return shared_array<Word>::FromArray(words);
 							})					
@@ -80,8 +126,8 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 			{
 				auto idx = _nodes.size()-1;
 				
-				auto & metrics = ee.nodes[i].extensions.rintintin.metrics;
-			
+				auto & metrics = rtt.metrics;
+				
 				_nodes[idx].skinnedMesh = SkinnedMesh::Factory(
 					_nodes[idx].mesh,
 					_nodes[idx].skin,
@@ -164,7 +210,7 @@ counted_ptr<const TonTon::SkinnedMesh> TonTon::GltfMemo::operator[](int idx) con
 
 counted_ptr<const TonTon::SkinnedMesh> TonTon::GltfMemo::at(int nodeIdx) const { return operator[](nodeIdx); }
 
-counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Document const* _doc, size_t i, fx::ExtensionsAndExtras & ee)
+counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Document const* _doc, size_t i)
 {
 	auto & sk = _doc->skins[_doc->nodes[i].skin];	
 	auto N =  sk.joints.size();		
@@ -231,10 +277,8 @@ counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Documen
 		[&](uint32_t j) -> shared_array<Word>
 		{
 			words.clear();
-			StringToWords(words, bone_names[j]);
-			
-			if(j < ee.nodes.size())
-				StringToWords(words, ee.nodes[j].extras.capability);
+			StringToWords(words, bone_names[j]);					
+			StringToWords(words, GetCapability(_doc, j));
 			
 			return shared_array<Word>::FromArray(words);
 		})			

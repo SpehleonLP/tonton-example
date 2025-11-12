@@ -1,12 +1,12 @@
 #ifndef TONTON_FXGLTF_MEMO_H
 #define TONTON_FXGLTF_MEMO_H
-#include "Support/shared_array.hpp"
-#include "Support/counted_ptr.hpp"
+#include "tonton_shared_array.hpp"
+#include "tonton_counted_ptr.hpp"
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-namespace fx { namespace gltf { struct Document; } struct ExtensionsAndExtras; }
+namespace fx { namespace gltf { struct Document; } }
 namespace TonTon { struct Armature; struct Mesh; struct SkinnedMesh;  }
 
 namespace DoDeeDum 
@@ -54,7 +54,7 @@ private:
 	std::shared_ptr<const fx::gltf::Document> _doc;
 	mutable std::vector<Node> _nodes;
 	
-	static counted_ptr<const Armature> BuildRaw(fx::gltf::Document const* _doc, size_t i, fx::ExtensionsAndExtras & ee);
+	static counted_ptr<const Armature> BuildRaw(fx::gltf::Document const* _doc, size_t i);
 };
 
 }

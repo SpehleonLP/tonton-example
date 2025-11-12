@@ -1,8 +1,8 @@
 #include <iostream>
-#include "example/get_armatures_from_files.h"
-#include "Threads/threadpool.h"
-#include "include/tonton_formatter.h"
-#include "include/tonton_input.h"
+#include "get_armatures_from_files.h"
+#include "tonton_formatter.h"
+#include "tonton_input.h"
+#include "tonton_output.h"
 
 const char banner[] = 
 "\n"
@@ -30,9 +30,6 @@ enum class RttErrorCode;
 
 int main(int argc, const char * args[])
 {
-	auto tp = ThreadPool::Factory();
-	tp->Initialize();
-	
 	if(argc > 1)
 		std::cout << "running rintintin...\n";
 		
@@ -59,8 +56,6 @@ int main(int argc, const char * args[])
 	}
 	
 	(void)banner;
-	
-	tp->ShutdownAndRelease();
 	
 	return 0;
 }

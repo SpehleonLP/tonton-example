@@ -1,8 +1,8 @@
 #ifndef GLTF_RINTINTIN_BRIDGE_H
 #define GLTF_RINTINTIN_BRIDGE_H
-#include "include/rintintin.h"
-#include "fx/extensions/extensionsandextras.h"
-#include "fx/extensions/lf_rintintin.h"
+#include "fx/gltf.h"
+#include "rintintin.h"
+#include "lf_rintintin.h"
 #include <future>
 #include <glm/fwd.hpp>
 #include <memory>

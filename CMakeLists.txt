@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(tonton-example VERSION 1.0.0 LANGUAGES CXX C)
 
 # Set C++ and C standards
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -71,62 +71,65 @@ set(TONTON_SOURCES
     src/get_armatures_from_files.cpp
     src/tonton_fxgltf_memo.cpp
     src/gltf_rintintin_bridge.cpp
+    modules/tonton/modules/dodeedum/extensions/dodeedum_fxgltf_bridge.cpp
     ${COMMON_SOURCES}
 )
 
 # ============================================================================
 # rintintin executable
 # ============================================================================
-add_executable(rintintin ${RINTINTIN_SOURCES})
+add_executable(rintintin-analyze ${RINTINTIN_SOURCES})
 
-target_include_directories(rintintin PRIVATE
+target_include_directories(rintintin-analyze PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
+    ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
     ${CMAKE_SOURCE_DIR}/modules/rintintin/include
 )
 
-target_link_libraries(rintintin PRIVATE
-    rintintin-lib
+target_link_libraries(rintintin-analyze PRIVATE
+    rintintin
     fx-gltf
 )
 
 if(glm_FOUND)
-    target_link_libraries(rintintin PRIVATE glm::glm)
+    target_link_libraries(rintintin-analyze PRIVATE glm::glm)
 endif()
 
 # Add threading support
 find_package(Threads REQUIRED)
-target_link_libraries(rintintin PRIVATE Threads::Threads)
+target_link_libraries(rintintin-analyze PRIVATE Threads::Threads)
 
 # ============================================================================
-# tonton executable
+# tonton-analyze executable
 # ============================================================================
-add_executable(tonton ${TONTON_SOURCES})
+add_executable(tonton-analyze ${TONTON_SOURCES})
 
-target_include_directories(tonton PRIVATE
+target_include_directories(tonton-analyze PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
+    ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
     ${CMAKE_SOURCE_DIR}/modules/tonton/include
     ${CMAKE_SOURCE_DIR}/modules/rintintin/include
 )
 
-target_link_libraries(tonton PRIVATE
+target_link_libraries(tonton-analyze PRIVATE
     tonton
     fx-gltf
-    rintintin-lib
+    rintintin
 )
 
 if(glm_FOUND)
-    target_link_libraries(tonton PRIVATE glm::glm)
+    target_link_libraries(tonton-analyze PRIVATE glm::glm)
 endif()
 
 # Add threading support
-target_link_libraries(tonton PRIVATE Threads::Threads)
+target_link_libraries(tonton-analyze PRIVATE Threads::Threads)
 
 # ============================================================================
 # Installation (optional)
 # ============================================================================
-install(TARGETS rintintin tonton
+install(TARGETS rintintin-analyze tonton-analyze
     RUNTIME DESTINATION bin
 )
 
@@ -146,8 +149,8 @@ message(STATUS "  - tonton (Apache-2.0)")
 message(STATUS "    - dodeedum (MIT)")
 message(STATUS "")
 message(STATUS "Executables to build:")
-message(STATUS "  - rintintin: Volumetric analysis + debug visualization")
-message(STATUS "  - tonton: Biomechanical creature analysis")
+message(STATUS "  - rintintin-analyze: Volumetric analysis + debug visualization")
+message(STATUS "  - tonton-analyze: Biomechanical creature analysis")
 message(STATUS "")
 message(STATUS "NOTE: This project is GPL-2.0 licensed due to rintintin dependency")
 message(STATUS "=============================================================================")

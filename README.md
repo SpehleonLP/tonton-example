@@ -21,13 +21,13 @@ Physical parameters, locomotion capabilities, behavioral profile
 
 This repository builds two command-line tools:
 
-### 1. `rintintin` - Volumetric Analysis
+### 1. `rintintin-analyze` - Volumetric Analysis
 
 Processes GLTF files to compute volumetric properties for each joint in skinned meshes.
 
 **Usage:**
 ```bash
-rintintin <input.gltf>
+rintintin-analyze <input.gltf>
 ```
 
 **Output:**
@@ -83,13 +83,13 @@ Structure:
 
 Each array has one entry per joint in the skeleton, indexed by joint order.
 
-### 2. `tonton` - Biomechanical Analysis
+### 2. `tonton-analyze` - Biomechanical Analysis
 
 Reads GLTF files with the `LF_RINTINTIN` extension and performs creature analysis.
 
 **Usage:**
 ```bash
-tonton <input-with-extension.gltf>
+tonton-analyze <input-with-extension.gltf>
 ```
 
 **Output:**
@@ -143,14 +143,14 @@ SENSORY SYSTEMS
 
 ```bash
 # Step 1: Compute volumetric data
-./rintintin dragon.gltf
+./rintintin-analyze dragon.gltf
 
 # Step 2: View debug visualization (optional)
 # Open dragon.gltf-balls.glb in a GLTF viewer
 # You'll see ellipsoids representing inertia tensors for each joint
 
 # Step 3: Run creature analysis
-./tonton dragon.gltf > dragon-analysis.txt
+./tonton-analyze dragon.gltf > dragon-analysis.txt
 
 # Step 4: Review the physical parameters
 cat dragon-analysis.txt
@@ -177,8 +177,8 @@ cmake ..
 make
 
 # Executables will be in build/
-./rintintin ../path/to/model.gltf
-./tonton ../path/to/model.gltf
+./rintintin-analyze ../path/to/model.gltf
+./tonton-analyze ../path/to/model.gltf
 ```
 
 ## Repository Structure

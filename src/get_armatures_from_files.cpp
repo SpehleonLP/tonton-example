@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <iostream>
 
-#include "include/rintintin.h"
+#include "rintintin.h"
 
 enum class RttErrorCode;
 static bool OpenFile(fx::gltf::Document & doc, const char * argument);

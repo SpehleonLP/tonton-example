@@ -39,13 +39,13 @@ These models are intended as:
 To process a model:
 ```bash
 # Compute volumetric properties
-../build/rintintin "animal_name.gltf"
+../build/rintintin-analyze "animal_name.gltf"
 
 # View debug visualization
 # Open animal_name.gltf-balls.glb in a GLTF viewer
 
 # Run biomechanical analysis
-../build/tonton "animal_name.gltf"
+../build/tonton-analyze "animal_name.gltf"
 ```
 
 ## Semantic Bone Naming
