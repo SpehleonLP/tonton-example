@@ -31,23 +31,6 @@ add_subdirectory(modules/rintintin)
 add_subdirectory(modules/tonton)
 
 # ============================================================================
-# Create symlink for old "thirdparty" path references
-# This allows source files to use #include "../thirdparty/..." paths
-# ============================================================================
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/thirdparty")
-    if(UNIX)
-        execute_process(
-            COMMAND ${CMAKE_COMMAND} -E create_symlink
-                "${CMAKE_SOURCE_DIR}/modules"
-                "${CMAKE_SOURCE_DIR}/thirdparty"
-        )
-        message(STATUS "Created symlink: thirdparty -> modules")
-    else()
-        message(WARNING "Cannot create symlink on non-Unix platform. You may need to update include paths.")
-    endif()
-endif()
-
-# ============================================================================
 # Gather source files for bridge libraries
 # ============================================================================
 

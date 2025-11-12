@@ -2,8 +2,8 @@
 #include <filesystem>
 #include "gltf_rintintin_bridge.h"
 #include "primitives.h"
-#include "../thirdparty/fx-gltf/include/fx/gltf.h"
-#include "../thirdparty/rintintin/include/rintintin.h"
+#include "../modules/fx-gltf/include/fx/gltf.h"
+#include "../modules/rintintin/include/rintintin.h"
 #include <span>
 
 #include <glm/gtc/quaternion.hpp>
