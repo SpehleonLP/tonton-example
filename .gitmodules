@@ -1,0 +1,9 @@
+[submodule "modules/tonton"]
+	path = modules/tonton
+	url = git@github.com:SpehleonLP/tonton.git
+[submodule "modules/fx-gltf"]
+	path = modules/fx-gltf
+	url = https://github.com/jessey-git/fx-gltf
+[submodule "modules/rintintin"]
+	path = modules/rintintin
+	url = git@github.com:SpehleonLP/rintintin.git
