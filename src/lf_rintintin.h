@@ -20,12 +20,13 @@ struct Transform
 	} 
 };
 
+// gets added to nodes with both a skin and a mesh
 struct RinTinTin
 {
 	struct Eigen
 	{
 		std::array<float, 4> rotation;
-		std::array<float, 3> lambda;
+		std::array<float, 3> lambda; // min, mid, max ordering
 	
 		inline bool empty() const { return false; } 
 	};
@@ -36,15 +37,18 @@ struct RinTinTin
 		float surfaceArea{}; 
 		
 		std::array<float, 3> centroid{0};
-		std::array<float, 6> inertia{0};
+		std::array<float, 6> inertia{0}; // xx yy zz xy xz yz, assumes unit density.
 		
-		std::array<float, 3> min, max{0};		
-		std::array<float, 3> covariance{0};
+		std::array<float, 3> min, max{0};	 // AABB of affected verticies	
+		std::array<float, 3> covariance{0}; // trace of covariance, can get the rest from inertia
 	
 		inline bool empty() const { return false; } 
 	};
 
+	// all 3 are optional, all must have the same number of elements as joints in the skin
+	// defined per skin. 
 	std::vector<Metrics> metrics;
+	// useful to create colliders from tensors. 
 	std::vector<Eigen> eigenDecompositions;
 	std::vector<Transform> orientedBoundedBoxes;
 	

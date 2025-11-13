@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LF_RINTINTIN Node Extension",
+  "type": "object",
+  "description": "Per-joint geometric and inertial properties for skinned meshes.",
+  "properties": {
+    "metrics": {
+      "type": "array",
+      "description": "Geometric and inertial metrics per joint. Array length must match number of joints in the skin.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "volume": {
+            "type": "number",
+            "description": "Volume in cubic meters",
+            "minimum": 0.0,
+            "default": 0.0
+          },
+          "surfaceArea": {
+            "type": "number", 
+            "description": "Surface area in square meters",
+            "minimum": 0.0,
+            "default": 0.0
+          },
+          "centroid": {
+            "type": "array",
+            "description": "Center of mass [x, y, z] in node-local coordinates",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3,
+            "default": [0.0, 0.0, 0.0]
+          },
+          "inertia": {
+            "type": "array",
+            "description": "Inertia tensor [Ixx, Iyy, Izz, Ixy, Ixz, Iyz] in kg⋅m²",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 6,
+            "maxItems": 6,
+            "default": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+          },
+          "min": {
+            "type": "array",
+            "description": "AABB minimum corner [x, y, z]",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3,
+            "default": [0.0, 0.0, 0.0]
+          },
+          "max": {
+            "type": "array",
+            "description": "AABB maximum corner [x, y, z]",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3,
+            "default": [0.0, 0.0, 0.0]
+          },
+          "covariance": {
+            "type": "array",
+            "description": "Diagonal covariance matrix elements [Cxx, Cyy, Czz]",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3,
+            "default": [0.0, 0.0, 0.0]
+          }
+        }
+      }
+    },
+    "eigenDecompositions": {
+      "type": "array",
+      "description": "Principal axes and eigenvalues of inertia tensors per joint.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rotation": {
+            "type": "array",
+            "description": "Quaternion [x, y, z, w] for principal axes",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "lambda": {
+            "type": "array",
+            "description": "Eigenvalues [min, mid, max] in ascending order",
+            "items": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "required": ["rotation", "lambda"]
+      }
+    },
+    "orientedBoundingBoxes": {
+      "type": "array",
+      "description": "Oriented bounding boxes per joint.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rotation": {
+            "type": "array",
+            "description": "Quaternion [x, y, z, w] for OBB orientation",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "translation": {
+            "type": "array",
+            "description": "OBB center position [x, y, z]",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "scaling": {
+            "type": "array",
+            "description": "OBB half-extents [x, y, z]",
+            "items": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        },
+        "required": ["rotation", "translation", "scaling"]
+      }
+    }
+  },
+  "anyOf": [
+    { "required": ["metrics"] },
+    { "required": ["eigenDecompositions"] },
+    { "required": ["orientedBoundingBoxes"] }
+  ]
+}
