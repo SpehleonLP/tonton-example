@@ -11,7 +11,7 @@ using namespace fx::gltf::detail;
 
 namespace LF
 {
-	inline void from_json(nlohmann::json const& json, Rintintin::Eigen & db)
+	inline void from_json(nlohmann::json const& json, RinTinTin::Eigen & db)
 	{
 		ReadField(rotation);
 		ReadField(lambda);
@@ -24,7 +24,7 @@ namespace LF
 		ReadOptField(scaling);
 	}
 	
-	inline void from_json(nlohmann::json const& json, Rintintin::Metrics & db)
+	inline void from_json(nlohmann::json const& json, RinTinTin::Metrics & db)
 	{
 		ReadField(volume);
 		ReadField(centroid);
@@ -43,13 +43,13 @@ namespace LF
 		WriteOptField(scaling, fx::gltf::defaults::IdentityVec3);
 	}
 	
-	inline void to_json(nlohmann::json & json, Rintintin::Eigen const& db)
+	inline void to_json(nlohmann::json & json, RinTinTin::Eigen const& db)
 	{
 		WriteReqField(rotation);
 		WriteReqField(lambda);
 	}
 	
-	inline void to_json(nlohmann::json & json, Rintintin::Metrics const& db)
+	inline void to_json(nlohmann::json & json, RinTinTin::Metrics const& db)
 	{
 		WriteReqField(volume);
 		WriteReqField(centroid);
@@ -62,14 +62,14 @@ namespace LF
 	}
 	
 	
-	void from_json(nlohmann::json const& json, Rintintin & db)
+	void from_json(nlohmann::json const& json, RinTinTin & db)
 	{
 		ReadOptField(metrics);
 		ReadOptField(eigenDecompositions);
 		ReadOptField(orientedBoundedBoxes);
 	}
 	
-	void to_json(nlohmann::json & json, Rintintin const& db)
+	void to_json(nlohmann::json & json, RinTinTin const& db)
 	{
 		Write_Field(metrics);
 		Write_Field(eigenDecompositions);

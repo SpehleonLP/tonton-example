@@ -8,7 +8,7 @@
 
 using GLTFAttributeData = RTT::GLTFAttributeData;
 
-namespace LF { void from_json(nlohmann::json const& json, Rintintin & db); }
+namespace LF { void from_json(nlohmann::json const& json, RinTinTin & db); }
 	
 static std::string GetCapability(fx::gltf::Document const* doc, uint32_t i)
 {	
@@ -45,7 +45,7 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 		meshes[i] = TonTon::Mesh::Factory(DoDeeDum::GetMesh(*_doc, i));
 	}
 	
-	LF::Rintintin rtt;
+	LF::RinTinTin rtt;
 	std::string capabilities;
 	
 	auto GetRTTExtension = [&](uint32_t i) -> bool
@@ -61,7 +61,7 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 			
 		try
 		{
-			rtt = itr2->get<LF::Rintintin>();
+			rtt = itr2->get<LF::RinTinTin>();
 		}
 		catch(...)
 		{

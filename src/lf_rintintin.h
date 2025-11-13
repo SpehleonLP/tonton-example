@@ -20,7 +20,7 @@ struct Transform
 	} 
 };
 
-struct Rintintin
+struct RinTinTin
 {
 	struct Eigen
 	{

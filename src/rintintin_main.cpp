@@ -2,30 +2,88 @@
 #include <filesystem>
 #include "gltf_rintintin_bridge.h"
 #include "primitives.h"
+#include "lf_rintintin.h"
 #include "../modules/fx-gltf/include/fx/gltf.h"
 #include "../modules/rintintin/include/rintintin.h"
 #include <span>
 
 #include <glm/gtc/quaternion.hpp>
 
-bool OpenFile(fx::gltf::Document & doc, const char * path);
+bool OpenFile(fx::gltf::Document & doc, std::filesystem::path const& path);
+void SaveFile(fx::gltf::Document & doc, std::filesystem::path const& path);
 void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src);
 
 enum class RttErrorCode;
 
 void test_4d_vfunc();
 
+namespace LF { 	void to_json(nlohmann::json & json, RinTinTin const& db); }
+
+struct Arguments
+{
+	std::filesystem::path input;
+	std::filesystem::path output;
+	std::filesystem::path tensors;
+};
+
+std::vector<Arguments> GetArguments(int argc, const char * args[])
+{
+	Arguments read;
+	std::vector<Arguments> r;
+	
+	int state = 0;
+
+	for(int i = 1; i < argc; ++i)
+	{
+		if(args[i][0] == '-')
+		{
+			state = args[i][1];
+			continue;
+		}
+		
+		switch(state)
+		{
+		case 'v':
+			read.tensors = args[i];
+			break;
+		case 'o': 
+			read.output = args[i];
+			break;
+		default:
+			if(std::filesystem::exists(read.input))
+			{
+				r.push_back(read);
+			}
+			else 
+			{				
+				read.input = args[i];
+				read.output = args[i] + std::string("-output.gltf");
+				read.tensors = std::filesystem::path{};
+			}
+			break;
+		}
+		
+		state = 0;
+	}
+		
+	if(std::filesystem::exists(read.input))
+	{
+		r.push_back(read);
+	}
+	
+	return r;
+}
+
 int main(int argc,const char * args[])
 {
-//	glm::quat_cast();
-//	test_4d_vfunc();
+	auto argv = GetArguments(argc, args);
 	
-	for(int i = 1; i < argc; ++i)
+	for(auto & arg : argv)
 	{
 		try
 		{
 			fx::gltf::Document doc;
-			if(!OpenFile(doc, args[i]))
+			if(!OpenFile(doc, arg.input))
 				continue;
 
 			fx::gltf::Document dst;
@@ -36,38 +94,24 @@ int main(int argc,const char * args[])
 			auto duration_ms = std::chrono::duration<double, std::milli>(time_taken);
 			std::cout << "processed in: " << duration_ms.count() << "ms\n";
 			
-			
-			if(dst.scenes.size())
-			{			
-			// change to save in binary format instead of text format.
-				for(auto & buf : dst.buffers)
-				{
-					buf.byteLength = buf.data.size();
-					buf.uri.clear();
-				}
-					
-				std::string path= (std::string(args[i]) += "-balls.glb");
-				fx::gltf::Save(dst, path, true);
-				std::cout << "saved: " << path << "\n";
-			}
+			SaveFile(doc, arg.output);
+			SaveFile(dst, arg.tensors);
 		}
 		catch(std::exception & e)
 		{
-			std::cerr << args[i] << ": " << e.what() << ".\n";
+			std::cerr << arg.input << ": " << e.what() << ".\n";
 		}
 		catch(RttErrorCode ec)
 		{
-			std::cerr << args[i] << ": " << rintintin_get_error_string(int(ec)) << "\n";
+			std::cerr << arg.input << ": " << rintintin_get_error_string(int(ec)) << "\n";
 		}
 	}
 
 	return 0;
 }
 
-bool OpenFile(fx::gltf::Document & doc, const char * argument)
+bool OpenFile(fx::gltf::Document & doc, std::filesystem::path const& path)
 {
-	std::filesystem::path path(argument);
-	
 	if(std::filesystem::exists(path) == false)
 	{
 		throw std::runtime_error("no such file or directory.");
@@ -89,6 +133,47 @@ bool OpenFile(fx::gltf::Document & doc, const char * argument)
 	
 	return doc.buffers.size();
 }
+
+void SaveFile(fx::gltf::Document & doc, std::filesystem::path const& path)
+{
+	auto IsBinary = [](std::filesystem::path const& path)
+	{
+		auto extension = std::string(path.extension());
+		
+		for(auto & c : extension) c = tolower(c);
+		
+		if(extension == ".glb")
+			return 1;
+		if(extension == ".gltf")
+			return 0;
+			
+		return -1;
+	};
+
+	int is_binary = IsBinary(path);
+	if(is_binary == -1) return;
+	
+	if(doc.scenes.size())
+	{
+		for(auto & buf : doc.buffers)
+		{
+			buf.byteLength = buf.data.size();
+				
+			if(is_binary)
+			{
+				buf.uri.clear();
+			}
+			else
+			{
+				buf.uri = std::filesystem::path(path).replace_extension(".bin");
+			}
+		}
+					
+		fx::gltf::Save(doc, path, is_binary);
+		std::cout << "saved: " << path << "\n";
+	}
+};
+
 
 void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintintin_skin & skin, rintintin_metrics * metrics);
 
@@ -153,6 +238,38 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 		if(ec < 0) throw RttErrorCode(ec);
 
 		VisualizeInertia(dst, src.nodes[i].name, cmd.skin, cmd.results);
+		
+		std::vector<rintintin_inertia_estimation> bounds;	
+	
+		bounds.resize(cmd.skin.no_joints);
+		
+		rintintin_bounding_box_command b_cmd;
+		b_cmd.meshes = cmd.meshes;
+		b_cmd.metrics = cmd.results;
+		
+		b_cmd.result = bounds.data();
+		
+		b_cmd.no_joints = cmd.skin.no_joints;
+		b_cmd.no_meshes = cmd.no_meshes;
+		b_cmd.result_byte_length = sizeof(bounds[0]) * bounds.size();
+		
+		ec = rintintin_oriented_bounding_boxes(&b_cmd);
+		if(ec < 0) throw RttErrorCode(ec);
+		
+		LF::RinTinTin extension;
+		
+		extension.metrics.resize(cmd.skin.no_joints);
+		extension.eigenDecompositions.resize(cmd.skin.no_joints);
+		extension.orientedBoundedBoxes.resize(cmd.skin.no_joints);
+		
+		for(auto i = 0u; i < cmd.skin.no_joints; ++i)
+		{
+			extension.metrics[i] = LF::Factory(cmd.results[i]);
+			extension.eigenDecompositions[i] = LF::MakeEigen(cmd.results[i]);
+			extension.orientedBoundedBoxes[i] = LF::Factory(bounds[i]); 
+		}
+		
+		src.nodes[i].extensionsAndExtras["extras"]["LF_RINTINTIN"] = extension;
 	}
 }
 

@@ -46,7 +46,7 @@ std::vector<InputFile> GetArmaturesFromFiles(std::span<const char*> args)
 		
 		for(j = i; j < result.size() && result[j].path == path; ++j)
 		{
-			auto ptr = dynamic_cast<TonTon::RintintinBuilder*>(result[j].builder.get());
+			auto ptr = dynamic_cast<TonTon::RinTinTinBuilder*>(result[j].builder.get());
 			
 			if(ptr)
 				ptr->VisualizeTensors(dst);

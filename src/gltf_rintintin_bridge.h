@@ -60,7 +60,7 @@ using attrib_t = decltype(RintintinMeshData::attributes);
 	
 	std::vector<rintintin_metrics> const& GetMetrics() const;
 	std::vector<rintintin_inertia_estimation> const& GetBoundingBoxes() const;
-	LF::Rintintin MakeExtension(bool eigenDecomposition) const;
+	LF::RinTinTin MakeExtension(bool eigenDecomposition) const;
 	
 	rintintin_process_command GetMeshCommand();
 	rintintin_skin const& GetSkin() const { return skin.skin; };
@@ -88,8 +88,8 @@ private:
 
 namespace LF
 {
-Rintintin::Metrics Factory(rintintin_metrics const& it);
-Rintintin::Eigen MakeEigen(rintintin_metrics const& it);
+RinTinTin::Metrics Factory(rintintin_metrics const& it);
+RinTinTin::Eigen MakeEigen(rintintin_metrics const& it);
 Transform Factory(rintintin_inertia_estimation const& it);
 }
 

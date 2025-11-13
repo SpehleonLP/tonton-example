@@ -26,7 +26,7 @@ bool GLTFAttributeData::isValid() const {
 }
 
 // Convert glTF component type to rintintin type
-rintintin_type gltfToRintintinType(fx::gltf::Accessor::ComponentType componentType) {
+rintintin_type gltfToRinTinTinType(fx::gltf::Accessor::ComponentType componentType) {
     switch (componentType) {
         case fx::gltf::Accessor::ComponentType::Byte: return RINTINTIN_TYPE_BYTE;
         case fx::gltf::Accessor::ComponentType::UnsignedByte: return RINTINTIN_TYPE_UNSIGNED_BYTE;
@@ -76,7 +76,7 @@ rintintin_attrib createRintintinAttrib(const GLTFAttributeData& gltfData) {
     rintintin_attrib attrib = {};
     attrib.src = const_cast<void*>(static_cast<const void*>(gltfData.data));
     attrib.byte_length = gltfData.bufferView->byteLength;
-    attrib.type = gltfToRintintinType(gltfData.accessor->componentType);
+    attrib.type = gltfToRinTinTinType(gltfData.accessor->componentType);
     attrib.size = getComponentCount(gltfData.accessor->type);
     attrib.normalized = gltfData.accessor->normalized ? 1 : 0;
     attrib.stride = static_cast<unsigned short>(gltfData.bufferView->byteStride);
@@ -92,7 +92,7 @@ rintintin_attrib createRintintinAttrib(const GLTFAttributeData& gltfData) {
 }
 
 // Convert glTF primitive mode to rintintin geometry type
-rintintin_geometry_type gltfToRintintinGeometry(fx::gltf::Primitive::Mode mode) {
+rintintin_geometry_type gltfToRinTinTinGeometry(fx::gltf::Primitive::Mode mode) {
     switch (mode) {
         case fx::gltf::Primitive::Mode::Triangles: return RINTINTIN_TRIANGLES;
         case fx::gltf::Primitive::Mode::TriangleStrip: return RINTINTIN_TRIANGLE_STRIP;
@@ -144,14 +144,14 @@ RintintinMeshData createRintintinMeshFromPrimitive(
     meshData.mesh.weights_user_data = &(*meshData.attributes)[2];
     
     meshData.mesh.no_verts = positionData.accessor->count;
-    meshData.mesh.geometry_type = gltfToRintintinGeometry(primitive.mode);
+    meshData.mesh.geometry_type = gltfToRinTinTinGeometry(primitive.mode);
     
     // Handle indices
     if (primitive.indices >= 0) {
         auto indexData = GLTFAttributeData(&document, primitive.indices);
         if (indexData.isValid()) {
             meshData.mesh.index_array_buffer = indexData.data;
-            meshData.mesh.index_type = gltfToRintintinType(indexData.accessor->componentType);
+            meshData.mesh.index_type = gltfToRinTinTinType(indexData.accessor->componentType);
             meshData.mesh.no_indices = indexData.accessor->count;
         }
     } else {
@@ -510,7 +510,7 @@ std::pair<glm::quat, glm::vec3> EigenDecomposition(glm::mat3 const& I)
 	);
 }
 
-LF::Rintintin  RintintinCommand::MakeExtension(bool eigenDecomposition) const
+LF::RinTinTin  RintintinCommand::MakeExtension(bool eigenDecomposition) const
 {
 	if(_result.empty() && error_code == 0)
 	{
@@ -521,7 +521,7 @@ LF::Rintintin  RintintinCommand::MakeExtension(bool eigenDecomposition) const
 	if(error_code)
 		throw RttErrorCode{error_code};
 
-	LF::Rintintin r;
+	LF::RinTinTin r;
 	
 	r.metrics.resize(_result.metrics.size());
 	
@@ -546,9 +546,9 @@ LF::Rintintin  RintintinCommand::MakeExtension(bool eigenDecomposition) const
 	return r;
 }
 	
-LF::Rintintin::Metrics LF::Factory(rintintin_metrics const& it)
+LF::RinTinTin::Metrics LF::Factory(rintintin_metrics const& it)
 {
-	LF::Rintintin::Metrics r;
+	LF::RinTinTin::Metrics r;
 	
 	r.volume = it.volume;
 	r.surfaceArea = it.surfaceArea;
@@ -570,12 +570,12 @@ LF::Rintintin::Metrics LF::Factory(rintintin_metrics const& it)
 	return r;
 }
 
-LF::Rintintin::Eigen LF::MakeEigen(const rintintin_metrics &it)
+LF::RinTinTin::Eigen LF::MakeEigen(const rintintin_metrics &it)
 {
 	auto eigen = rintintin_compute_eigen(&it.inertia);
 	auto quat = rintintin_compute_rotation_quat(&eigen);
 		
-	return LF::Rintintin::Eigen{
+	return LF::RinTinTin::Eigen{
 		.rotation={float(quat.w), float(quat.x), float(quat.y), float(quat.z)},
 		.lambda={float(eigen.values[0]), float(eigen.values[1]), float(eigen.values[2])}
 	};
