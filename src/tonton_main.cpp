@@ -43,6 +43,9 @@ int main(int argc, const char * args[])
 		TonTon::Input input;
 	//	input.structure_vs_weight = 1.0;
 	//	input.muscle_quality = 1.0;
+		input.behavior.aggression_adjustment=1.0;
+		input.behavior.social_tendency=0.0;
+		
 		input.behavior.scale = glm::vec3(1.0);
 		for(auto i = 0u; i < armature.memo->size(); ++i)
 		{

@@ -1,0 +1,81 @@
+
+=== TonTon Output ===
+
+Physical:
+  body_mass_kg: 0.00194157
+  body_length_m: 0.0241147
+  total_length_m: 0.0671049
+  body_volume_m3: 2.21894e-06
+  surface_area_m2: 0.00397831
+  cross_sectional_area_m2: 7.88715e-05
+  cross_sectional_diameter: 0.0100211
+  fineness_ratio: 4.26522
+
+Metabolic:
+  basal_rate_W: 0.00304944
+  max_rate_W: 0.0213461
+  aerobic_scope: 7
+  muscle_mass_kg: 0.000776628
+  available_muscle_power_W: 0.155326
+  is_endotherm: false
+
+Behavior:
+  aggression: 1
+  social_tendency: 0.25
+  activity_level: 0.21
+  curiosity: 0.5
+  territoriality: 0.5
+  diurnal_preference: 0.2
+  is_migratory: false
+  suggested_archetype: OPPORTUNISTIC_SCAVENGER
+
+Sensory:
+  vision.acuity: 0.7
+  vision.binocular_overlap: 0.412892
+  vision.has_color_vision: true
+  vision.has_night_vision: true
+  vision.detection_range_m: 1
+  hearing.sensitivity: 0.5
+  hearing.frequency_range_Hz: 100 - 10000
+  hearing.detection_range_m: 5
+
+Diagnostics:
+  overall_confidence: 0.4
+
+Terrestrial:
+  posture: 0.474661
+  can_breathe_while_running: false
+  legs:
+    Manipulator(root:0 tip:15 reach:0.0280539m grip:1.62874e-06N)
+    Manipulator(root:0 tip:19 reach:0.0397989m grip:6.78449e-07N)
+    Manipulator(root:0 tip:23 reach:0.0292113m grip:8.27097e-07N)
+    Manipulator(root:0 tip:31 reach:0.0279674m grip:1.6262e-06N)
+    Manipulator(root:0 tip:35 reach:0.0397791m grip:6.70555e-07N)
+    Manipulator(root:0 tip:39 reach:0.0291784m grip:8.14884e-07N)
+  max_sprint_speed_m_s: 1.91767
+  max_sustainable_speed_m_s: 0.169675
+  optimal_speed_m_s: 0.118773
+  max_sprint_duration_s: 60
+  recovery_time_s: 59.9979
+
+Aerial:
+  wings:
+    Wing(root:24 tip:25 span:0.0597386m area:0.000475644m² chord length:0.00135234m  AR:15.0058)
+    Wing(root:26 tip:27 span:0.0620314m area:0.000533964m² chord length:0.00115202m  AR:14.4125)
+    Wing(root:40 tip:41 span:0.0600431m area:0.000475644m² chord length:0.00135234m  AR:15.1591)
+    Wing(root:42 tip:43 span:0.0622414m area:0.000533964m² chord length:0.00115202m  AR:14.5103)
+  wingbeat_frequency_Hz: 55.4422
+  speeds (min/cruise/max): 3.20421/9.00482/13.5072 m/s
+  turning radius: 1.39716 m
+  cost (flap/hover): 6.81186/2.39225 W/N
+
+Jumping:
+  mechanism: ELASTIC_CATAPULT
+  max_jump_height_m: 0.955658
+  max_jump_distance_m: 2.207
+  takeoff_velocity_m_s: 5
+
+Appendages:
+  tails:
+    Tail(root:5 tip:11 len:0.0429902m)
+===================
