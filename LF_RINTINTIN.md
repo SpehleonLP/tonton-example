@@ -60,17 +60,17 @@ All three property arrays are optional, but at least one must be present if the 
 
 ### Metrics
 
-Per-joint geometric and inertial properties. All metrics are computed in the local space of the node.
+Per-joint geometric and inertial properties. All metrics are computed in unit-density and the local space of the node.
 
-|   |Type|Description|Required|
-|---|----|-----------|--------|
-|**volume**|`number`|Volume in cubic meters of geometry influenced by this joint|No, default: `0.0`|
-|**surfaceArea**|`number`|Surface area in square meters of geometry influenced by this joint|No, default: `0.0`|
-|**centroid**|`number[3]`|Center of mass in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
-|**inertia**|`number[6]`|Inertia tensor components `[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]` in kg⋅m² relative to the centroid|No, default: `[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]`|
-|**min**|`number[3]`|Minimum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
-|**max**|`number[3]`|Maximum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
-|**covariance**|`number[3]`|Diagonal elements of covariance matrix `[Cxx, Cyy, Czz]`|No, default: `[0.0, 0.0, 0.0]`|
+|   |Type|Unit|Description|Required|
+|---|----|----|-----------|--------|
+|**volume**|`number`| m^3 |Volume in cubic meters of geometry influenced by this joint|No, default: `0.0`|
+|**surfaceArea**|`number`| m^2 |Surface area in square meters of geometry influenced by this joint|No, default: `0.0`|
+|**centroid**|`number[3]`| m |Center of mass in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
+|**inertia**|`number[6]` | (\(\rho\)= 1 ) * (volume m^3) * m^2 = m^5 |Inertia tensor components `[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]` in kg⋅m² relative to the centroid|No, default: `[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]`|
+|**min**|`number[3]` | m |Minimum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
+|**max**|`number[3]`| m | Maximum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
+|**covariance**|`number[3]`| m^5 | Diagonal elements of covariance matrix `[Cxx, Cyy, Czz]` off-diagonal are not stored because they're the same as inertia. meaning this is pre-multiplied by volume. |No, default: `[0.0, 0.0, 0.0]`|
 
 **Example:**
 

@@ -30,20 +30,18 @@ enum class RttErrorCode;
 
 int main(int argc, const char * args[])
 {
-	if(argc > 1)
-		std::cout << "running rintintin...\n";
+//	if(argc > 1) std::cout << "running rintintin...\n";
 		
 	auto armatures = GetArmaturesFromFiles({args+1, args+argc});
 	
-	if(armatures.size())
-		std::cout << banner;
+//	if(armatures.size()) std::cout << banner;
 	
 	for(auto & armature : armatures) 
 	{
 		TonTon::Input input;
 	//	input.structure_vs_weight = 1.0;
 	//	input.muscle_quality = 1.0;
-		input.behavior.aggression_adjustment=1.0;
+		input.average_density=0.9;
 		input.behavior.social_tendency=0.0;
 		
 		input.behavior.scale = glm::vec3(1.0);

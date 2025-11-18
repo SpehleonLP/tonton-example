@@ -4,6 +4,11 @@ This directory contains test models for the tonton/rintintin pipeline.
 
 ## Source
 
+Aquatic models are derrived from **Quaternius's Lowpoly Animated Fish**:
+- Original source: https://quaternius.itch.io/lowpoly-animated-fish
+- Original creator: [Quaternius][https://quaternius.itch.io]
+- Original license: Creative Commons
+
 These models are derived from **David O'Reilly's Everything Library - Animals**:
 - Original source: https://davidoreilly.itch.io/everything-library-animals
 - Original creator: [David O'Reilly](https://www.davidoreilly.com/)
@@ -100,7 +105,7 @@ THE MODELS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIE
 ## Attribution
 
 When using these models, please credit:
-- Original models: David O'Reilly (https://davidoreilly.itch.io/everything-library-animals)
+- Original models: David O'Reilly [David O'Reilly](https://www.davidoreilly.com/) and [Quaternius][https://quaternius.itch.io]
 - Rigging/skinning modifications: Spehleon LP
 
 ## Contributing Additional Models

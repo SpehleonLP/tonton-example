@@ -105,7 +105,8 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 								words.clear();
 								StringToWords(words, cmd.skin.bone_names[j]);
 								
-								StringToWords(words, GetCapability(_doc.get(), j));
+								if(j < sk.joints.size())
+									StringToWords(words, GetCapability(_doc.get(), sk.joints[j]));
 								
 								return shared_array<Word>::FromArray(words);
 							})					

@@ -38,6 +38,12 @@ std::vector<Arguments> GetArguments(int argc, const char * args[])
 		if(args[i][0] == '-')
 		{
 			state = args[i][1];
+			
+			if(state == 'v')
+			{
+				read.tensors = (std::string(read.input) += ("-tensors.glb"));
+			}
+			
 			continue;
 		}
 		
