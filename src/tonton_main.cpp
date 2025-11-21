@@ -91,7 +91,7 @@ int main(int argc, const char * args[])
 		input.environment = environment;
 	//	input.structure_vs_weight = 1.0;
 	//	input.muscle_quality = 1.0;
-		input.average_density=0.9;
+		input.average_density=0.5;
 		input.behavior.social_tendency=0.0;
 		
 		for(auto i = 0u; i < armature.memo->size(); ++i)
