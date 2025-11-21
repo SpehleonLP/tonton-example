@@ -98,6 +98,7 @@ target_include_directories(tonton-analyze PRIVATE
 
 target_link_libraries(tonton-analyze PRIVATE
     tonton
+    dodeedum  # Explicit dependency to ensure proper rebuild tracking
     fx-gltf
     rintintin
 )

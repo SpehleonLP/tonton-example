@@ -10,6 +10,7 @@ class InputBuilder;
 
 struct InputFile
 {
+	int index;
 	std::string path;
 	std::string filename;
 	

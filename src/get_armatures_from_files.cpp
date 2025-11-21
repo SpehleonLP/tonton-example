@@ -15,6 +15,9 @@ std::vector<InputFile> GetArmaturesFromFiles(std::span<const char*> args)
 
 	for(auto i = 0u; i < args.size(); ++i)
 	{
+		if(args[i][0] == '-')
+			continue;
+			
 		auto path = args[i];
 			
 		try
@@ -24,6 +27,7 @@ std::vector<InputFile> GetArmaturesFromFiles(std::span<const char*> args)
 				return {};
 
 			result.push_back(InputFile{
+				.index=int(i),
 				.path=path,
 				.filename=std::filesystem::path(path).stem().string(),
 				.memo = TonTon::GltfMemo::Factory(std::make_shared<fx::gltf::Document>(std::move(mesh_file)))						
