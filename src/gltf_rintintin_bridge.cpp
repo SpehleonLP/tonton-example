@@ -467,49 +467,6 @@ std::vector<rintintin_inertia_estimation> const&  RintintinCommand::GetBoundingB
 }
 	
 
-
-std::pair<glm::quat, glm::vec3> EigenDecomposition(glm::dmat3 const& I)
-{
-	rintintin_symmetric_mat3 sm = 
-	{
-		.xx = (I[0][0]),
-		.yy = (I[1][1]),
-		.zz = (I[2][2]),
-		.xy = (I[0][1]),
-		.xz = (I[0][2]),
-		.yz = (I[1][2]),
-	};
-	
-	auto eigen = rintintin_compute_eigen(&sm);
-	auto q = rintintin_compute_rotation_quat(&eigen);
-	
-	return std::make_pair<glm::quat, glm::vec3>(
-		(glm::dquat&)q,
-		(glm::dvec3&)eigen.values
-	);
-}
-
-std::pair<glm::quat, glm::vec3> EigenDecomposition(glm::mat3 const& I)
-{
-	rintintin_symmetric_mat3 sm = 
-	{
-		.xx = (I[0][0]),
-		.yy = (I[1][1]),
-		.zz = (I[2][2]),
-		.xy = (I[0][1]),
-		.xz = (I[0][2]),
-		.yz = (I[1][2]),
-	};
-	
-	auto eigen = rintintin_compute_eigen(&sm);
-	auto q = rintintin_compute_rotation_quat(&eigen);
-	
-	return std::make_pair<glm::quat, glm::vec3>(
-		(glm::dquat&)q,
-		(glm::dvec3&)eigen.values
-	);
-}
-
 LF::RinTinTin  RintintinCommand::MakeExtension(bool eigenDecomposition) const
 {
 	if(_result.empty() && error_code == 0)

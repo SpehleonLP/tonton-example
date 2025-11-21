@@ -32,6 +32,7 @@ namespace TonTon
 {
 Environment createEarthAir();
 Environment createEarthOcean();
+Environment createTitan();
 Environment createProximaCentauriB();
 Environment createTrappist1e();
 Environment createKepler442b();
@@ -73,16 +74,17 @@ int main(int argc, const char * args[])
 			std::string env = to_lower(std::string(args[index]+6));
 
 			if(env.find("air") != std::string::npos) environment = TonTon::createEarthAir();
-			if(env.find("ocean") != std::string::npos) environment = TonTon::createEarthOcean();
-			if(env.find("centauri") != std::string::npos) environment = TonTon::createProximaCentauriB();
-			if(env.find("trappist") != std::string::npos) environment = TonTon::createTrappist1e();
-			if(env.find("422b") != std::string::npos) environment = TonTon::createKepler442b();
-			if(env.find("lhs") != std::string::npos) environment = TonTon::createLHS1140b();
-			if(env.find("62f") != std::string::npos) environment = TonTon::createKepler62f();
-			if(env.find("18b") != std::string::npos) environment = TonTon::createK2_18b();
-			if(env.find("wolf") != std::string::npos) environment = TonTon::createWolf1061c();
-			if(env.find("gliese") != std::string::npos) environment = TonTon::createGliese667Cc();
-			if(env.find("europa") != std::string::npos) environment = TonTon::createIcyMoonOcean();		
+			else if(env.find("ocean") != std::string::npos) environment = TonTon::createEarthOcean();
+			else if(env.find("titan") != std::string::npos) environment = TonTon::createTitan();
+			else if(env.find("centauri") != std::string::npos) environment = TonTon::createProximaCentauriB();
+			else if(env.find("trappist") != std::string::npos) environment = TonTon::createTrappist1e();
+			else if(env.find("422b") != std::string::npos) environment = TonTon::createKepler442b();
+			else if(env.find("lhs") != std::string::npos) environment = TonTon::createLHS1140b();
+			else if(env.find("62f") != std::string::npos) environment = TonTon::createKepler62f();
+			else if(env.find("18b") != std::string::npos) environment = TonTon::createK2_18b();
+			else if(env.find("wolf") != std::string::npos) environment = TonTon::createWolf1061c();
+			else if(env.find("gliese") != std::string::npos) environment = TonTon::createGliese667Cc();
+			else if(env.find("europa") != std::string::npos) environment = TonTon::createIcyMoonOcean();		
 		}
 	
 		TonTon::Input input;
@@ -92,7 +94,6 @@ int main(int argc, const char * args[])
 		input.average_density=0.9;
 		input.behavior.social_tendency=0.0;
 		
-		input.behavior.scale = glm::vec3(1.0);
 		for(auto i = 0u; i < armature.memo->size(); ++i)
 		{
 			input.skinnedMesh = armature.memo->at(i);
@@ -249,6 +250,17 @@ Environment createIcyMoonOcean()
     env.gravity_m_s2 = 7.84f;             // 0.8 Earth gravity
     env.pressure_Pa = 120000.0f + (1040.0f * 7.84f * 100.0f); // Deep under ice
     env.temperature_K = 268.15f;          // -5°C
+    return env;
+}
+
+// Titan's surface atmosphere (not in lakes)
+Environment createTitan() {
+    Environment env;
+    env.fluidDensity_Kg_m3 = 5.3f;          // Very dense atmosphere at surface
+    env.fluidViscosity_Pa_s = 0.0000063f;   // Nitrogen gas viscosity at ~94K
+    env.gravity_m_s2 = 1.352f;              // 0.138 Earth gravity
+    env.pressure_Pa = 146500.0f;            // 1.45 atm surface pressure
+    env.temperature_K = 93.7f;              // -179.45°C (Titan surface temp)
     return env;
 }
 

@@ -9,9 +9,6 @@
 #include <span>
 #include <vector>
 
-std::pair<glm::quat, glm::vec3> EigenDecomposition(glm::mat3 const& m);
-std::pair<glm::quat, glm::vec3> EigenDecomposition(glm::dmat3 const& I);
-
 namespace fx { namespace gltf { struct Document; struct Primitive; }}
 enum class RttErrorCode;
 
