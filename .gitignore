@@ -1,5 +1,11 @@
+build
+*-output.bin
+*-output.gltf
+*-tensors.glb
+
 # Prerequisites
 *.d
+
 
 # Compiled Object files
 *.slo
