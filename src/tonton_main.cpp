@@ -60,7 +60,7 @@ int main(int argc, const char * args[])
 	};
 	
 	int index = 1;
-	TonTon::Environment environment;
+	TonTon::Input input;
 	for(auto & armature : armatures)
 	{
 		// armature.index is relative to the span passed to GetArmaturesFromFiles (args+1)
@@ -73,26 +73,26 @@ int main(int argc, const char * args[])
 
 			std::string env = to_lower(std::string(args[index]+6));
 
-			if(env.find("air") != std::string::npos) environment = TonTon::createEarthAir();
-			else if(env.find("ocean") != std::string::npos) environment = TonTon::createEarthOcean();
-			else if(env.find("titan") != std::string::npos) environment = TonTon::createTitan();
-			else if(env.find("centauri") != std::string::npos) environment = TonTon::createProximaCentauriB();
-			else if(env.find("trappist") != std::string::npos) environment = TonTon::createTrappist1e();
-			else if(env.find("422b") != std::string::npos) environment = TonTon::createKepler442b();
-			else if(env.find("lhs") != std::string::npos) environment = TonTon::createLHS1140b();
-			else if(env.find("62f") != std::string::npos) environment = TonTon::createKepler62f();
-			else if(env.find("18b") != std::string::npos) environment = TonTon::createK2_18b();
-			else if(env.find("wolf") != std::string::npos) environment = TonTon::createWolf1061c();
-			else if(env.find("gliese") != std::string::npos) environment = TonTon::createGliese667Cc();
-			else if(env.find("europa") != std::string::npos) environment = TonTon::createIcyMoonOcean();		
+			if(env.find("air") != std::string::npos) input.environment = TonTon::createEarthAir();
+			else if(env.find("ocean") != std::string::npos) input.environment = TonTon::createEarthOcean();
+			else if(env.find("titan") != std::string::npos) input.environment = TonTon::createTitan();
+			else if(env.find("centauri") != std::string::npos) input.environment = TonTon::createProximaCentauriB();
+			else if(env.find("trappist") != std::string::npos) input.environment = TonTon::createTrappist1e();
+			else if(env.find("422b") != std::string::npos) input.environment = TonTon::createKepler442b();
+			else if(env.find("lhs") != std::string::npos) input.environment = TonTon::createLHS1140b();
+			else if(env.find("62f") != std::string::npos) input.environment = TonTon::createKepler62f();
+			else if(env.find("18b") != std::string::npos) input.environment = TonTon::createK2_18b();
+			else if(env.find("wolf") != std::string::npos) input.environment = TonTon::createWolf1061c();
+			else if(env.find("gliese") != std::string::npos) input.environment = TonTon::createGliese667Cc();
+			else if(env.find("europa") != std::string::npos) input.environment = TonTon::createIcyMoonOcean();		
 		}
 	
-		TonTon::Input input;
-		input.environment = environment;
 	//	input.structure_vs_weight = 1.0;
-	//	input.muscle_quality = 1.0;
+		input.muscle_quality = 1.0;
+		input.metabolic_efficiency = 1.0;
 		input.average_density=0.5;
 		input.behavior.social_tendency=0.0;
+		input.behavior.scale = glm::vec3(1);
 		
 		for(auto i = 0u; i < armature.memo->size(); ++i)
 		{
