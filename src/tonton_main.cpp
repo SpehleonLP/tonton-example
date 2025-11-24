@@ -1,8 +1,8 @@
 #include <iostream>
 #include "get_armatures_from_files.h"
 #include "tonton_formatter.h"
-#include "tonton_input.h"
-#include "tonton_output.h"
+#include "tonton_skinnedmesh.h"
+#include "tonton_analysis.h"
 
 const char banner[] = 
 "\n"
