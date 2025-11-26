@@ -1,9 +1,10 @@
 #include "tonton_fxgltf_memo.h"
 #include "../modules/dodeedum/extensions/dodeedum_fxgltf_bridge.h"
 #include "fx/gltf.h"
-#include "../include/tonton_input.h"
+#include "../include/tonton_wordlist.h"
 #include "gltf_rintintin_bridge.h"
 #include "lf_rintintin.h"
+#include "tonton_skinnedmesh.h"
 #include <glm/gtx/matrix_decompose.hpp>
 
 using GLTFAttributeData = RTT::GLTFAttributeData;

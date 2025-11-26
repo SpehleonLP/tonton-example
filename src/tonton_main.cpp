@@ -1,6 +1,8 @@
 #include <iostream>
 #include "get_armatures_from_files.h"
+#include "tonton_builder.h"
 #include "tonton_formatter.h"
+#include "tonton_input.h"
 #include "tonton_skinnedmesh.h"
 #include "tonton_analysis.h"
 
@@ -48,7 +50,7 @@ int main(int argc, const char * args[])
 {
 //	if(argc > 1) std::cout << "running rintintin...\n";
 		
-	auto armatures = GetArmaturesFromFiles({args+1, args+argc});
+	std::vector<InputFile> armatures = GetArmaturesFromFiles({args+1, args+argc});
 	
 //	if(armatures.size()) std::cout << banner;
 	
@@ -92,11 +94,11 @@ int main(int argc, const char * args[])
 		input.metabolic_efficiency = 1.0;
 		input.average_density=0.5;
 		input.behavior.social_tendency=0.0;
-		input.behavior.scale = glm::vec3(1);
+		input.scale = 1;
 		
 		for(auto i = 0u; i < armature.memo->size(); ++i)
 		{
-			input.skinnedMesh = armature.memo->at(i);
+			input.builder = TonTon::Builder::Factory(*armature.memo->at(i));
 			auto output = TonTon::Output::Factory(input);
 			std::cout << *output;
 		}
@@ -120,7 +122,7 @@ Environment createEarthAir()
     env.fluidDensity_Kg_m3 = 1.225f;
     env.fluidViscosity_Pa_s = 1.81e-5f;
     env.gravity_m_s2 = 9.81f;
-    env.pressure_Pa = 101325.0f + (1025.0f * 9.81f * 30.0f); // Surface + 30m depth
+    env.fluidPressure_Pa = 101325.0f + (1025.0f * 9.81f * 30.0f); // Surface + 30m depth
     env.temperature_K = 293.15f;          // 20°C
     return env;
 }
@@ -132,7 +134,7 @@ Environment createEarthOcean()
     env.fluidDensity_Kg_m3 = 1025.0f;     // Seawater
     env.fluidViscosity_Pa_s = 0.00107f;   // Seawater at 20°C
     env.gravity_m_s2 = 9.81f;
-    env.pressure_Pa = 101325.0f + (1025.0f * 9.81f * 30.0f); // Surface + 30m depth
+    env.fluidPressure_Pa = 101325.0f + (1025.0f * 9.81f * 30.0f); // Surface + 30m depth
     env.temperature_K = 293.15f;          // 20°C
     return env;
 }
@@ -145,7 +147,7 @@ Environment createProximaCentauriB()
     env.fluidDensity_Kg_m3 = 1.4f;          // Denser atmosphere assumed
     env.fluidViscosity_Pa_s = 1.85e-5f;
     env.gravity_m_s2 = 12.46f;            // 1.27 Earth gravity
-    env.pressure_Pa = 150000.0f + (1030.0f * 12.46f * 50.0f); // Ice pressure + 50m depth
+    env.fluidPressure_Pa = 150000.0f + (1030.0f * 12.46f * 50.0f); // Ice pressure + 50m depth
     env.temperature_K = 278.15f;          // 5°C - cold but liquid
     return env;
 }
@@ -158,7 +160,7 @@ Environment createTrappist1e()
     env.fluidDensity_Kg_m3 = 1.3f;
     env.fluidViscosity_Pa_s = 1.82e-5f;
     env.gravity_m_s2 = 9.12f;             // 0.93 Earth gravity
-    env.pressure_Pa = 105000.0f + (1015.0f * 9.12f * 40.0f); // 40m depth
+    env.fluidPressure_Pa = 105000.0f + (1015.0f * 9.12f * 40.0f); // 40m depth
     env.temperature_K = 288.15f;          // 15°C
     return env;
 }
@@ -171,7 +173,7 @@ Environment createKepler442b()
     env.fluidDensity_Kg_m3 = 1.8f;          // Thicker atmosphere
     env.fluidViscosity_Pa_s = 1.95e-5f;
     env.gravity_m_s2 = 13.25f;            // 1.35 Earth gravity (super-Earth)
-    env.pressure_Pa = 135000.0f + (1050.0f * 13.25f * 60.0f); // Deep ocean, 60m
+    env.fluidPressure_Pa = 135000.0f + (1050.0f * 13.25f * 60.0f); // Deep ocean, 60m
     env.temperature_K = 283.15f;          // 10°C
     return env;
 }
@@ -184,7 +186,7 @@ Environment createLHS1140b()
     env.fluidDensity_Kg_m3 = 2.1f;          // Very thick atmosphere
     env.fluidViscosity_Pa_s = 2.0e-5f;
     env.gravity_m_s2 = 17.15f;            // 1.75 Earth gravity
-    env.pressure_Pa = 180000.0f + (1045.0f * 17.15f * 45.0f); // High pressure world
+    env.fluidPressure_Pa = 180000.0f + (1045.0f * 17.15f * 45.0f); // High pressure world
     env.temperature_K = 280.15f;          // 7°C
     return env;
 }
@@ -197,7 +199,7 @@ Environment createKepler62f()
     env.fluidDensity_Kg_m3 = 1.0f;          // Thinner atmosphere
     env.fluidViscosity_Pa_s = 1.75e-5f;
     env.gravity_m_s2 = 7.35f;             // 0.75 Earth gravity
-    env.pressure_Pa = 95000.0f + (1010.0f * 7.35f * 35.0f); // Lower pressure, 35m depth
+    env.fluidPressure_Pa = 95000.0f + (1010.0f * 7.35f * 35.0f); // Lower pressure, 35m depth
     env.temperature_K = 298.15f;          // 25°C - warm world
     return env;
 }
@@ -210,7 +212,7 @@ Environment createK2_18b()
     env.fluidDensity_Kg_m3 = 3.5f;          // H2-rich atmosphere, very dense
     env.fluidViscosity_Pa_s = 2.2e-5f;
     env.gravity_m_s2 = 23.54f;            // 2.4 Earth gravity (mini-Neptune)
-    env.pressure_Pa = 250000.0f + (980.0f * 23.54f * 25.0f); // Extreme pressure
+    env.fluidPressure_Pa = 250000.0f + (980.0f * 23.54f * 25.0f); // Extreme pressure
     env.temperature_K = 348.15f;          // 75°C - hot hycean world
     return env;
 }
@@ -223,7 +225,7 @@ Environment createWolf1061c()
     env.fluidDensity_Kg_m3 = 0.9f;          // Thin atmosphere
     env.fluidViscosity_Pa_s = 1.7e-5f;
     env.gravity_m_s2 = 11.27f;            // 1.15 Earth gravity
-    env.pressure_Pa = 88000.0f + (1035.0f * 11.27f * 55.0f); // Moderate depth
+    env.fluidPressure_Pa = 88000.0f + (1035.0f * 11.27f * 55.0f); // Moderate depth
     env.temperature_K = 271.15f;          // -2°C - near freezing
     return env;
 }
@@ -236,7 +238,7 @@ Environment createGliese667Cc()
     env.fluidDensity_Kg_m3 = 1.5f;
     env.fluidViscosity_Pa_s = 1.88e-5f;
     env.gravity_m_s2 = 13.73f;            // 1.4 Earth gravity
-    env.pressure_Pa = 115000.0f + (995.0f * 13.73f * 38.0f); // 38m depth
+    env.fluidPressure_Pa = 115000.0f + (995.0f * 13.73f * 38.0f); // 38m depth
     env.temperature_K = 308.15f;          // 35°C - tropical
     return env;
 }
@@ -248,7 +250,7 @@ Environment createIcyMoonOcean()
     env.fluidDensity_Kg_m3 = 1040.0f;     // Salty prevents freezing
     env.fluidViscosity_Pa_s = 0.0018f;    // Very viscous when cold
     env.gravity_m_s2 = 7.84f;             // 0.8 Earth gravity
-    env.pressure_Pa = 120000.0f + (1040.0f * 7.84f * 100.0f); // Deep under ice
+    env.fluidPressure_Pa = 120000.0f + (1040.0f * 7.84f * 100.0f); // Deep under ice
     env.temperature_K = 268.15f;          // -5°C
     return env;
 }
@@ -259,7 +261,7 @@ Environment createTitan() {
     env.fluidDensity_Kg_m3 = 5.3f;          // Very dense atmosphere at surface
     env.fluidViscosity_Pa_s = 0.0000063f;   // Nitrogen gas viscosity at ~94K
     env.gravity_m_s2 = 1.352f;              // 0.138 Earth gravity
-    env.pressure_Pa = 146500.0f;            // 1.45 atm surface pressure
+    env.fluidPressure_Pa = 146500.0f;            // 1.45 atm surface pressure
     env.temperature_K = 93.7f;              // -179.45°C (Titan surface temp)
     return env;
 }
