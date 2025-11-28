@@ -49,6 +49,101 @@ make
 - `rintintin-analyze`: Volumetric analysis tool
 - `tonton-analyze`: Biomechanical analysis tool
 
+## Dimensional Analysis System
+
+TonTon uses a **compile-time dimensional analysis system** via the `Quantity` template class (defined in `modules/tonton/include/tonton_units.hpp`) to prevent unit errors and catch physics mistakes at compile time. This is being integrated throughout the codebase because some physics formulas were "vibe coded" and dimensional analysis helps verify correctness.
+
+### Quantity Template Class
+
+```cpp
+template<int M, int L, int T, int Temp = 0, int Stage = 0>
+struct Quantity {
+    float value;
+    // ... operations ...
+};
+```
+
+**Template Parameters (Dimensional Exponents):**
+- `M`: Mass dimension (kg)
+- `L`: Length dimension (m)
+- `T`: Time dimension (s)
+- `Temp`: Temperature dimension (K)
+- `Stage`: Coordinate space tracker (file space → pose space conversions)
+
+**Type Safety Features:**
+- Addition/subtraction: Only allowed between quantities with **identical dimensions**
+  ```cpp
+  length_m a = 5.0f, b = 3.0f;
+  auto c = a + b;  // ✓ OK: length + length = length
+  auto d = a + velocity_m_s{2.0f};  // ✗ Compile error: can't add length + velocity
+  ```
+
+- Multiplication/division: **Combines/subtracts dimensions algebraically**
+  ```cpp
+  length_m dist = 100.0f;
+  time_s duration = 10.0f;
+  velocity_m_s speed = dist / duration;  // ✓ Automatically becomes m/s
+
+  mass_kg m = 5.0f;
+  acceleration_m_s2 a = 9.8f;
+  force_N f = m * a;  // ✓ Automatically becomes kg⋅m/s² (Newtons)
+  ```
+
+- Square root/cube root: Only allowed when **all dimensions are divisible** by 2/3
+  ```cpp
+  area_m2 area = 16.0f;
+  length_m side = sqrt(area);  // ✓ m² → m
+
+  length_m len = 5.0f;
+  auto bad = sqrt(len);  // ✗ Compile error: can't take √m
+  ```
+
+**Common Type Aliases:**
+```cpp
+// Base units
+using mass_kg = Quantity<1, 0, 0>;           // kg
+using length_m = Quantity<0, 1, 0>;          // m
+using time_s = Quantity<0, 0, 1>;            // s
+using temp_K = Quantity<0, 0, 0, 1>;         // K
+
+// Derived units
+using area_m2 = Quantity<0, 2, 0>;           // m²
+using volume_m3 = Quantity<0, 3, 0>;         // m³
+using velocity_m_s = Quantity<0, 1, -1>;     // m/s
+using acceleration_m_s2 = Quantity<0, 1, -2>; // m/s²
+using force_N = Quantity<1, 1, -2>;          // N = kg⋅m/s²
+using energy_J = Quantity<1, 2, -2>;         // J = kg⋅m²/s²
+using power_W = Quantity<1, 2, -3>;          // W = kg⋅m²/s³
+using density_kg_m3 = Quantity<1, -3, 0>;    // kg/m³
+using pressure_Pa = Quantity<1, -1, -2>;     // Pa = kg/(m⋅s²)
+```
+
+**Stage Parameter (Coordinate Space Tracking):**
+- Tracks transformations through different coordinate systems
+- Negative even stages: spatial coordinates (e.g., -6 = file space, -4 = pose space)
+- Negative odd stages: conversion scalars between spaces (e.g., -5 = file→pose scale)
+- Use `scale_to()` to multiply across stages:
+  ```cpp
+  length_b file_length;           // stage -2 (builder space)
+  length_b_to_m scale_factor;     // stage -1 (conversion factor)
+  length_m world_length = scale_to<0>(file_length, scale_factor);  // stage 0
+  ```
+
+**Conversion to Raw Values:**
+- Explicit cast required: `float raw = static_cast<float>(quantity);`
+- This is intentional to prevent accidental loss of dimensional information
+- Division by same-dimension quantity returns dimensionless float: `float ratio = length1 / length2;`
+
+**Why This Matters:**
+- Physics formulas are complex and easy to get wrong
+- Dimensional analysis catches errors like:
+  - Using area where volume is needed
+  - Forgetting to square/cube scale factors
+  - Mixing coordinate systems (file space vs. world space)
+  - Using kg where kg/m³ is expected
+- If a formula compiles with `Quantity` types, the dimensions are at least consistent
+- This doesn't guarantee the physics is *correct*, but rules out entire classes of unit errors
+
 ## Architecture
 
 ### Two-Executable Pipeline

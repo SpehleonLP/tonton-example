@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cxxopts.hpp>
 #include "get_armatures_from_files.h"
 #include "tonton_builder.h"
 #include "tonton_formatter.h"
@@ -6,7 +7,7 @@
 #include "tonton_skinnedmesh.h"
 #include "tonton_analysis.h"
 
-const char banner[] = 
+const char banner[] =
 "\n"
 "TTTTTTTTTTTTTTTTTTTTTTT                                                 TTTTTTTTTTTTTTTTTTTTTTT                                \n"
 "T:::::::::::::::::::::T                                                 T:::::::::::::::::::::T                                \n"
@@ -27,9 +28,6 @@ const char banner[] =
 "\n"
 "====================================================================================================================================\n\n";
 
-enum class RttErrorCode;
-
-
 namespace TonTon
 {
 Environment createEarthAir();
@@ -46,76 +44,190 @@ Environment createGliese667Cc();
 Environment createIcyMoonOcean();
 }
 
-int main(int argc, const char * args[])
+TonTon::Environment parseEnvironment(const std::string& env_str)
 {
-//	if(argc > 1) std::cout << "running rintintin...\n";
-		
-	std::vector<InputFile> armatures = GetArmaturesFromFiles({args+1, args+argc});
-	
-//	if(armatures.size()) std::cout << banner;
-	
-	auto to_lower = [&](std::string && s)
-	{
-		for(auto & c : s)
-			c = tolower(c);
-		return s;
-	};
-	
-	int index = 1;
-	TonTon::Input input;
-	for(auto & armature : armatures)
-	{
-		// armature.index is relative to the span passed to GetArmaturesFromFiles (args+1)
-		// so we need to add 1 to get the absolute index in the original args array
-		int absolute_index = armature.index + 1;
-		for(; index < absolute_index; ++index)
-		{
-			if(strncmp("--env=", args[index], 6) != 0)
-				continue;
+    std::string env_lower = env_str;
+    for (auto& c : env_lower)
+        c = tolower(c);
 
-			std::string env = to_lower(std::string(args[index]+6));
-
-			if(env.find("air") != std::string::npos) input.environment = TonTon::createEarthAir();
-			else if(env.find("ocean") != std::string::npos) input.environment = TonTon::createEarthOcean();
-			else if(env.find("titan") != std::string::npos) input.environment = TonTon::createTitan();
-			else if(env.find("centauri") != std::string::npos) input.environment = TonTon::createProximaCentauriB();
-			else if(env.find("trappist") != std::string::npos) input.environment = TonTon::createTrappist1e();
-			else if(env.find("422b") != std::string::npos) input.environment = TonTon::createKepler442b();
-			else if(env.find("lhs") != std::string::npos) input.environment = TonTon::createLHS1140b();
-			else if(env.find("62f") != std::string::npos) input.environment = TonTon::createKepler62f();
-			else if(env.find("18b") != std::string::npos) input.environment = TonTon::createK2_18b();
-			else if(env.find("wolf") != std::string::npos) input.environment = TonTon::createWolf1061c();
-			else if(env.find("gliese") != std::string::npos) input.environment = TonTon::createGliese667Cc();
-			else if(env.find("europa") != std::string::npos) input.environment = TonTon::createIcyMoonOcean();		
-		}
-	
-	//	input.structure_vs_weight = 1.0;
-		input.muscle_quality = 1.0;
-		input.metabolic_efficiency = 1.0;
-		input.average_density=0.5;
-		input.behavior.social_tendency=0.0;
-		input.scale = 1;
-		
-		for(auto i = 0u; i < armature.memo->size(); ++i)
-		{
-			input.builder = TonTon::Builder::Factory(*armature.memo->at(i));
-			auto output = TonTon::Output::Factory(input);
-			std::cout << *output;
-		}
-		
-		//solver << TonTon::BasicMorphology{};
-		//solver();
-	}
-	
-	(void)banner;
-	
-	return 0;
+    if (env_lower == "air") return TonTon::createEarthAir();
+    else if (env_lower == "ocean") return TonTon::createEarthOcean();
+    else if (env_lower == "titan") return TonTon::createTitan();
+    else if (env_lower == "centauri" || env_lower == "proxima") return TonTon::createProximaCentauriB();
+    else if (env_lower == "trappist") return TonTon::createTrappist1e();
+    else if (env_lower == "422b" || env_lower == "kepler422b") return TonTon::createKepler442b();
+    else if (env_lower == "lhs" || env_lower == "lhs1140b") return TonTon::createLHS1140b();
+    else if (env_lower == "62f" || env_lower == "kepler62f") return TonTon::createKepler62f();
+    else if (env_lower == "18b" || env_lower == "k2-18b") return TonTon::createK2_18b();
+    else if (env_lower == "wolf" || env_lower == "wolf1061c") return TonTon::createWolf1061c();
+    else if (env_lower == "gliese" || env_lower == "gliese667cc") return TonTon::createGliese667Cc();
+    else if (env_lower == "europa" || env_lower == "icy") return TonTon::createIcyMoonOcean();
+    else {
+        std::cerr << "Unknown environment: " << env_str << ", defaulting to air\n";
+        return TonTon::createEarthAir();
+    }
 }
+
+int main(int argc, char* argv[])
+{
+    try {
+        cxxopts::Options options("tonton-analyze", "Biomechanical creature analysis from GLTF files");
+
+        options.add_options()
+            ("files", "GLTF files to analyze", cxxopts::value<std::vector<std::string>>())
+            ("h,help", "Print usage")
+            ;
+
+        options.add_options("Environment")
+            ("env", "Environment preset (air, ocean, titan, centauri, trappist, 422b, lhs, 62f, 18b, wolf, gliese, europa)",
+             cxxopts::value<std::string>()->default_value("air"))
+            ;
+
+        options.add_options("Physical Parameters")
+            ("scale", "Scale multiplier (1.0 = original size)",
+             cxxopts::value<float>()->default_value("1.0"))
+            ("density", "Average body density (0.0=700kg/m³ → 1.0=1050kg/m³)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("structure", "Structure vs weight (0=lightweight/fragile → 1=robust/heavy)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("muscle", "Muscle quality (0=weak → 1=peak performance)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("feathers", "Feather quality (0=poor aerodynamics → 1=optimal)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("metabolism", "Metabolic efficiency (0=poor → 1=optimal)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("stability", "Flight mode (0=speed optimized → 1=hovering optimized)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("activity", "Activity level (0=flapping → 1=soaring)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("scaling", "Scaling strategy (0=normal → 1=aggressive size compensation)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("climbing", "Climbing ability (0=none → 1=vertical surfaces)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ;
+
+        options.add_options("Behavior")
+            ("coloration", "Coloration strategy (-1=camouflage → +1=aposematism)",
+             cxxopts::value<float>()->default_value("0.0"))
+            ("aggression", "Aggression adjustment (0.0-1.0)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("activity-adjust", "Activity adjustment (0.0-1.0)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("endurance", "Endurance vs power (0=sprint → 1=endurance)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("risk", "Risk tolerance (0.0-1.0)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("social", "Social tendency (0=solitary → 1=highly social)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("seasonal", "Seasonal behavior (0=resident → 1=migratory)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("circadian", "Activity pattern (0=diurnal → 1=nocturnal)",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("adaptability", "Adaptability (0=none → 1=advanced tool use)",
+             cxxopts::value<float>()->default_value("0.0"))
+            ;
+
+        options.add_options("Display")
+            ("banner", "Show ASCII banner")
+            ("q,quiet", "Suppress banner and verbose output")
+            ;
+
+        options.parse_positional({"files"});
+        options.positional_help("FILE [FILE...]");
+
+        auto result = options.parse(argc, argv);
+
+        if (result.count("help")) {
+            std::cout << options.help() << std::endl;
+            return 0;
+        }
+
+        if (!result.count("files")) {
+            std::cerr << "Error: No input files specified\n\n";
+            std::cout << options.help() << std::endl;
+            return 1;
+        }
+
+        // Show banner unless quiet
+        if (result.count("banner") && !result.count("quiet")) {
+            std::cout << banner;
+        }
+
+        // Parse environment
+        TonTon::Environment environment = parseEnvironment(result["env"].as<std::string>());
+
+        // Build input configuration
+        TonTon::Input input;
+        input.environment = environment;
+
+        // Physical parameters
+        input.scale = TonTon::length_b_to_m(result["scale"].as<float>());
+        input.average_density = result["density"].as<float>();
+        input.structure_vs_weight = result["structure"].as<float>();
+        input.muscle_quality = result["muscle"].as<float>();
+        input.feather_quality = result["feathers"].as<float>();
+        input.metabolic_efficiency = result["metabolism"].as<float>();
+        input.stability_vs_speed = result["stability"].as<float>();
+        input.activity_level = result["activity"].as<float>();
+        input.scaling_strategy = result["scaling"].as<float>();
+        input.climbing_ability = result["climbing"].as<float>();
+
+        // Behavior parameters
+        input.behavior.coloration = result["coloration"].as<float>();
+        input.behavior.aggression_adjustment = result["aggression"].as<float>();
+        input.behavior.activity_adjustment = result["activity-adjust"].as<float>();
+        input.behavior.endurance_vs_power = result["endurance"].as<float>();
+        input.behavior.risk_tolerance = result["risk"].as<float>();
+        input.behavior.social_tendency = result["social"].as<float>();
+        input.behavior.seasonal_behavior = result["seasonal"].as<float>();
+        input.behavior.activity_pattern = result["circadian"].as<float>();
+        input.behavior.adaptability = result["adaptability"].as<float>();
+
+        // Get file list
+        auto files = result["files"].as<std::vector<std::string>>();
+
+        // Convert to const char* array for GetArmaturesFromFiles
+        std::vector<const char*> file_ptrs;
+        for (const auto& f : files) {
+            file_ptrs.push_back(f.c_str());
+        }
+
+        // Load and process files
+        std::vector<InputFile> armatures = GetArmaturesFromFiles({file_ptrs.data(), file_ptrs.data() + file_ptrs.size()});
+
+        if (armatures.empty()) {
+            std::cerr << "Error: No valid armatures found in input files\n";
+            return 1;
+        }
+
+        // Process each armature
+        for (auto& armature : armatures) {
+            for (auto i = 0u; i < armature.memo->size(); ++i) {
+                input.builder = TonTon::Builder::Factory(*armature.memo->at(i));
+                auto output = TonTon::Output::Factory(input);
+                std::cout << *output;
+            }
+        }
+
+    } catch (const cxxopts::exceptions::exception& e) {
+        std::cerr << "Error parsing arguments: " << e.what() << "\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
+
+    return 0;
+}
+
+// ============================================================================
+// Environment Presets
+// ============================================================================
 
 namespace TonTon
 {
 
-// Earth baseline 
+// Earth baseline
 Environment createEarthAir()
 {
     Environment env;

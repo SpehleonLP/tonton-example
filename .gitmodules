@@ -7,3 +7,6 @@
 [submodule "modules/rintintin"]
 	path = modules/rintintin
 	url = git@github.com:SpehleonLP/rintintin.git
+[submodule "modules/cxxopts"]
+	path = modules/cxxopts
+	url = https://github.com/jarro2783/cxxopts.git

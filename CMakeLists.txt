@@ -94,6 +94,7 @@ target_include_directories(tonton-analyze PRIVATE
     ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
     ${CMAKE_SOURCE_DIR}/modules/tonton/include
     ${CMAKE_SOURCE_DIR}/modules/rintintin/include
+    ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
 )
 
 target_link_libraries(tonton-analyze PRIVATE

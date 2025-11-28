@@ -12,10 +12,18 @@ rintintin (computes volumes, inertia, covariance matrices)
     ↓
 GLTF + LF_RINTINTIN extension (enriched with volumetric data)
     ↓
-tonton (biomechanical analysis)
+tonton Builder (processes raw geometric measurements)
+    ↓
+tonton Analysis (applies biomechanical models with dimensional analysis)
     ↓
 Physical parameters, locomotion capabilities, behavioral profile
 ```
+
+**Key features:**
+- **Compile-time dimensional analysis**: Uses C++ template metaprogramming (`Quantity<M,L,T>`) to catch unit errors at compile time
+- **Three-tier architecture**: SkinnedMesh → Builder (raw measurements) → Output (physics-based analysis)
+- **Configurable parameters**: Tune muscle quality, feather quality, behavior, environment, and more via command-line
+- **Multiple environments**: Test creatures in Earth air/ocean, Titan's atmosphere, or exoplanet conditions
 
 ## Executables
 
@@ -85,15 +93,81 @@ Each array has one entry per joint in the skeleton, indexed by joint order.
 
 ### 2. `tonton-analyze` - Biomechanical Analysis
 
-Reads GLTF files with the `LF_RINTINTIN` extension and performs creature analysis.
+Reads GLTF files with the `LF_RINTINTIN` extension and performs creature analysis with configurable parameters.
 
 **Usage:**
 ```bash
-tonton-analyze <input-with-extension.gltf>
+tonton-analyze [options] <file1.gltf> [file2.gltf ...]
+
+Options:
+  -h, --help                Show help message
+
+  Environment:
+  --env <preset>            Environment preset (default: air)
+                            Options: air, ocean, titan, centauri, trappist,
+                                     422b, lhs, 62f, 18b, wolf, gliese, europa
+
+  Physical Parameters (0.0-1.0 normalized):
+  --scale <float>           Scale multiplier (default: 1.0)
+  --density <float>         Body density (0.0=700kg/m³, 1.0=1050kg/m³, default: 0.5)
+  --structure <float>       Structural quality (default: 0.5)
+  --muscle <float>          Muscle quality (default: 0.5)
+  --feathers <float>        Feather/membrane quality (default: 0.5)
+  --metabolism <float>      Metabolic efficiency (default: 0.5)
+  --stability <float>       Stability vs speed (0=speed, 1=hovering, default: 0.5)
+  --activity <float>        Activity multiplier (default: 1.0)
+  --scaling <float>         Wing scaling factor (default: 1.0)
+  --climbing <float>        Climbing capability multiplier (default: 1.0)
+
+  Behavior Parameters (0.0-1.0 normalized):
+  --coloration <float>      Coloration conspicuousness (default: 0.5)
+  --aggression <float>      Aggression adjustment (default: 0.0)
+  --activity-adjust <float> Activity level adjustment (default: 0.0)
+  --endurance <float>       Endurance adjustment (default: 0.0)
+  --risk <float>            Risk tolerance adjustment (default: 0.0)
+  --social <float>          Social tendency adjustment (default: 0.0)
+  --seasonal <float>        Seasonal behavior adjustment (default: 0.0)
+  --circadian <float>       Circadian rhythm adjustment (default: 0.0)
+  --adaptability <float>    Behavioral adaptability (default: 0.5)
 ```
 
+**Examples:**
+```bash
+# Basic analysis with defaults
+tonton-analyze dragon.gltf
+
+# High-quality bird with strong muscles
+tonton-analyze --muscle 0.9 --feathers 0.95 --metabolism 0.8 bird.gltf
+
+# Aquatic creature analysis
+tonton-analyze --env ocean --density 0.3 fish.gltf
+
+# Titan atmosphere (low gravity, dense atmosphere)
+tonton-analyze --env titan --scale 10.0 dragonfly.gltf
+
+# Aggressive predator with high endurance
+tonton-analyze --aggression 0.8 --endurance 0.7 predator.gltf
+
+# Analyze multiple files with same parameters
+tonton-analyze --env ocean *.gltf
+```
+
+**Environment Presets:**
+- `air` - Earth atmosphere (default)
+- `ocean` - Earth ocean
+- `titan` - Saturn's moon Titan (low gravity, dense atmosphere)
+- `centauri` - Proxima Centauri b
+- `trappist` - TRAPPIST-1e
+- `422b` - Kepler-442b
+- `lhs` - LHS 1140b
+- `62f` - Kepler-62f
+- `18b` - K2-18b
+- `wolf` - Wolf 1061c
+- `gliese` - Gliese 667Cc
+- `europa` - Europa ocean
+
 **Output:**
-Prints analysis results to stdout using the tonton formatter. Example output:
+Prints analysis results to stdout using the tonton std::format formatter. Example output:
 ```
 ====================================================================
 PHYSICAL PROPERTIES
@@ -149,20 +223,35 @@ SENSORY SYSTEMS
 # Open dragon.gltf-balls.glb in a GLTF viewer
 # You'll see ellipsoids representing inertia tensors for each joint
 
-# Step 3: Run creature analysis
+# Step 3: Run creature analysis with default parameters
 ./tonton-analyze dragon.gltf > dragon-analysis.txt
 
 # Step 4: Review the physical parameters
 cat dragon-analysis.txt
+
+# Advanced: Customize analysis parameters
+./tonton-analyze \
+  --env air \
+  --muscle 0.8 \
+  --feathers 0.9 \
+  --metabolism 0.7 \
+  --aggression 0.6 \
+  dragon.gltf > dragon-custom.txt
+
+# Analyze for different environments
+./tonton-analyze --env ocean --density 0.3 sea_creature.gltf
+./tonton-analyze --env titan --scale 5.0 giant_dragonfly.gltf
 ```
 
 ## Building
 
-This project uses CMake and requires C++17.
+This project uses CMake and requires C++20.
 
 ### Prerequisites
 - CMake 3.15+
-- C++17 compiler
+- **C++20 compiler** (GCC 13+, Clang 14+, or MSVC 19.29+)
+  - Required for `std::format` in tonton formatter
+  - Some components may work with C++17, but C++20 is recommended
 - GLM (OpenGL Mathematics library)
 
 ### Build Steps
