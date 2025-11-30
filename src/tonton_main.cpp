@@ -203,7 +203,7 @@ int main(int argc, char* argv[])
         // Process each armature
         for (auto& armature : armatures) {
             for (auto i = 0u; i < armature.memo->size(); ++i) {
-                input.builder = TonTon::Builder::Factory(*armature.memo->at(i));
+                input.builder = TonTon::Builder::Factory(armature.memo->at(i));
                 auto output = TonTon::Output::Factory(input);
                 std::cout << *output;
             }

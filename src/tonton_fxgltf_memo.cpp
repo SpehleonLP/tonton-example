@@ -234,7 +234,23 @@ counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Documen
 
 	auto parents = shared_array<int>(N, -1);
 	
+		
 	GLTFAttributeData inverseBindPoseMatrics(_doc, sk.inverseBindMatrices);
+	auto M = std::min<size_t>(N, inverseBindPoseMatrics.accessor->count);
+		
+	for(auto j = 0u; j < M; ++j)
+	{
+		auto node = sk.joints[j];
+		if(node < _doc->nodes.size()) 
+		{
+			for(auto child : _doc->nodes[node].children)
+			{
+				int childNode = nodeToJointMap[child];
+				parents[childNode] = i;
+			}
+		}
+	}
+	
 	/*
 	if(inverseBindPoseMatrics.isValid())
 	{
