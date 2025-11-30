@@ -94,12 +94,12 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 					{
 						auto cmd = command->GetMeshCommand();
 						std::vector<Word> words;
+						GLTFAttributeData inverseBindPoseMatrics(_doc.get(), sk.inverseBindMatrices);
 						
 						skins[_doc->nodes[i].skin] = TonTon::Armature::Factory(
 							shared_array<std::string>::FromArray(cmd.skin.bone_names,  N),
 							shared_array<int>::FromArray(cmd.skin.parents, N),
-							shared_array<glm::vec3>::FromArray((glm::dvec3*)cmd.skin.joint_translation_mesh_space, N),
-							shared_array<glm::quat>::FromArray(q.data(), N),
+							std::span<const glm::mat4>{(const glm::mat4*)(inverseBindPoseMatrics.data), inverseBindPoseMatrics.accessor->count},
 							shared_array<immutable_array<Word>>::Build( N, 
 							[&](uint32_t j)
 							{
@@ -233,11 +233,9 @@ counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Documen
 	}
 
 	auto parents = shared_array<int>(N, -1);
-	auto positions = shared_array<glm::vec3>(N, glm::vec3(0));
-	auto rotations = shared_array<glm::quat>(N, glm::quat(1, 0, 0, 0));
 	
 	GLTFAttributeData inverseBindPoseMatrics(_doc, sk.inverseBindMatrices);
-	
+	/*
 	if(inverseBindPoseMatrics.isValid())
 	{
 		auto array = (glm::mat4*)(inverseBindPoseMatrics.data);
@@ -268,13 +266,12 @@ counted_ptr<const TonTon::Armature> TonTon::GltfMemo::BuildRaw(fx::gltf::Documen
 			rotations[j] = rotation;
 			positions[j] = translation;
 		}
-	}				
+	}	*/		
 	
 	return TonTon::Armature::Factory(
 		bone_names,
 		parents,
-		positions,
-		rotations,
+		std::span<const glm::mat4>{(const glm::mat4*)(inverseBindPoseMatrics.data), inverseBindPoseMatrics.accessor->count},
 		shared_array<immutable_array<Word>>::Build( N, 
 		[&](uint32_t j) -> shared_array<Word>
 		{
