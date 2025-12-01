@@ -54,6 +54,7 @@ rintintin-analyze <input.gltf>
 **The LF_RINTINTIN Extension:**
 
 This is a **custom GLTF 2.0 extension** (not approved by Khronos) defined in [src/lf_rintintin.h](src/lf_rintintin.h). It stores volumetric analysis data on nodes that bind skins to meshes.
+Note: rintintin does not check that the tensors are positive-determinent, though they will be for well formed input. 
 
 Structure:
 ```json
@@ -93,7 +94,7 @@ Each array has one entry per joint in the skeleton, indexed by joint order.
 
 ### 2. `tonton-analyze` - Biomechanical Analysis
 
-Reads GLTF files with the `LF_RINTINTIN` extension and performs creature analysis with configurable parameters.
+Reads GLTF files and performs creature analysis with configurable parameters. if LF_RINTINTIN is provided it will use those values, otherwise it will run rintintin itself. 
 
 **Usage:**
 ```bash
@@ -129,9 +130,56 @@ Options:
   --seasonal <float>        Seasonal behavior adjustment (default: 0.0)
   --circadian <float>       Circadian rhythm adjustment (default: 0.0)
   --adaptability <float>    Behavioral adaptability (default: 0.5)
+  
+  Mana Parameters :
+  --water <float>           Aristotle: takes shape of container, flows and changes. improves ability to change direction.
+  --fire <float>            Aristotle: source of motion and life
+  --earth <float>           Aristotle: heavy and stable. behaves as if cross section of limbs is increased.
+  --air <float>             Aristotle: medium actively pushes objects along their path. behaves as if propulsion surfaces are bigger.
+  --aether <float>          Aristotle: celestial element, falls upward. adds bouyancy force making things floatier. 
+  --shadow <float>          stick to surfaces, conform to terrain. increases traction and grip.
 ```
 
+**Understanding Input Parameters: Natural Variation vs. Mystical Corrections**
+
+TonTon analyzes creatures using **allometric scaling laws** - empirical relationships observed across real animals. For example, "bird wing area typically scales with body mass^0.67" based on studies of hundreds of species.
+
+These biological relationships aren't perfect. When research papers report R² = 0.7, that means:
+- **70% of variation is explained** by the formula (mass → wing area relationship)
+- **30% is unexplained** - real animals naturally vary around the trend line
+
+A hummingbird and an eagle of the same mass don't have *exactly* the same wing area predicted by the formula. One might have 15% more, the other 15% less, depending on ecological niche, flight style, and evolutionary history.
+
+**Standard Parameters: Positioning Within Natural Biological Variance**
+
+Parameters like `--muscle`, `--feathers`, `--structure` let you position a creature within that observed biological variation:
+
+- **0.0** = bottom of the natural range (viable but suboptimal)
+- **0.5** = average (exactly on the regression line from research papers)
+- **1.0** = top of the natural range (exceptional but still biologically plausible)
+
+These don't break physics - they pick where in the spectrum of *real observed animals* your creature falls. Think of it as tuning whether you want a "below average" bird or an "Olympic athlete" bird.
+
+**Mana Parameters: Breaking Physics for Impossible Creatures**
+
+Sometimes you need to analyze creatures that **violate the laws of physics** - like dragons with wings far too small to generate enough lift, or pegasi that are too heavy to fly with horse-sized bodies.
+
+Mana parameters are **mystical corrections** that bend the rules:
+
+- `--aether <value>` - Reduces effective weight by 2^value (things weigh less, fall slower)
+- `--air <value>` - Increases wing/propulsion thrust by 2^value (air actively pushes the creature)
+- `--fire <value>` - Boosts metabolic power by 2^value (more energy available)
+- `--earth <value>` - Increases structural strength (as if bones/limbs were thicker)
+- `--water <value>` - Improves maneuverability and directional changes
+- `--shadow <value>` - Increases traction and grip on surfaces
+
 **Examples:**
+- **Dragons** have a lot of wind force, so you'd use `--air=2` to increase their wing thrust by 4×
+- **Pegasus** is much more graceful and light, so you'd use `--aether=2` to treat it as if it weighs 4× less
+
+Without these corrections, the analysis would correctly report "this creature cannot physically fly" - mana parameters let you model *how* the magic makes it work.
+
+**Command-Line Examples:**
 ```bash
 # Basic analysis with defaults
 tonton-analyze dragon.gltf
@@ -155,7 +203,7 @@ tonton-analyze --env ocean *.gltf
 **Environment Presets:**
 - `air` - Earth atmosphere (default)
 - `ocean` - Earth ocean
-- `titan` - Saturn's moon Titan (low gravity, dense atmosphere)
+- `titan` - Saturn's moon Titan (low gravity, dense atmosphere, very cold)
 - `centauri` - Proxima Centauri b
 - `trappist` - TRAPPIST-1e
 - `422b` - Kepler-442b

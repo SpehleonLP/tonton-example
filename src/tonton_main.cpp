@@ -127,9 +127,25 @@ int main(int argc, char* argv[])
              cxxopts::value<float>()->default_value("0.0"))
             ;
 
+        options.add_options("Mana")
+            ("water", "Aristotle: takes shape of container, flows and changes",
+             cxxopts::value<float>()->default_value("0.0"))
+            ("fire", "Aristotle: source of motion and life",
+             cxxopts::value<float>()->default_value("0.0"))
+            ("earth", "Aristotle: heavy and stable",
+             cxxopts::value<float>()->default_value("0.0"))
+            ("air", "Aristotle: medium actively pushes objects along their path",
+             cxxopts::value<float>()->default_value("0.0"))
+            ("aether", "Aristotle: falls upward",
+             cxxopts::value<float>()->default_value("0.5"))
+            ("shadow", "stick to surfaces, conform to terrain",
+             cxxopts::value<float>()->default_value("0.0"))
+            ;
+            
         options.add_options("Display")
             ("banner", "Show ASCII banner")
             ("q,quiet", "Suppress banner and verbose output")
+            ("v,verbose", "Show intermediary builder struct")
             ;
 
         options.parse_positional({"files"});
@@ -183,6 +199,13 @@ int main(int argc, char* argv[])
         input.behavior.activity_pattern = result["circadian"].as<float>();
         input.behavior.adaptability = result["adaptability"].as<float>();
 
+        input.mana.water = result["water"].as<float>();
+        input.mana.fire = result["fire"].as<float>();
+        input.mana.earth = result["earth"].as<float>();
+        input.mana.air = result["air"].as<float>();
+        input.mana.aether = result["aether"].as<float>();
+        input.mana.shadow = result["shadow"].as<float>();
+        
         // Get file list
         auto files = result["files"].as<std::vector<std::string>>();
 
@@ -204,6 +227,10 @@ int main(int argc, char* argv[])
         for (auto& armature : armatures) {
             for (auto i = 0u; i < armature.memo->size(); ++i) {
                 input.builder = TonTon::Builder::Factory(armature.memo->at(i));
+                
+                if(result.count("verbose"))
+					std::cout << *input.builder;
+                
                 auto output = TonTon::Output::Factory(input);
                 std::cout << *output;
             }
