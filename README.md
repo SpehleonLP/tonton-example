@@ -175,7 +175,7 @@ Mana parameters are **mystical corrections** that bend the rules:
 
 **Examples:**
 - **Dragons** have a lot of wind force, so you'd use `--air=2` to increase their wing thrust by 4×
-- **Pegasus** is much more graceful and light, so you'd use `--aether=2` to treat it as if it weighs 4× less
+- **Pegasus** is much more graceful and light, so you'd use `--aether=2` to treat it as if it weighs 4× less (applies bouyancy force not inertia corrections)
 
 Without these corrections, the analysis would correctly report "this creature cannot physically fly" - mana parameters let you model *how* the magic makes it work.
 
@@ -214,52 +214,115 @@ tonton-analyze --env ocean *.gltf
 - `gliese` - Gliese 667Cc
 - `europa` - Europa ocean
 
-**Output:**
-Prints analysis results to stdout using the tonton std::format formatter. Example output:
-```
-====================================================================
-PHYSICAL PROPERTIES
-  Body Mass: 2.45 kg
-  Body Length: 0.85 m
-  Body Volume: 0.00234 m³
-  Surface Area: 1.23 m²
-  Cross-sectional Area: 0.045 m²
-  Fineness Ratio: 5.2
+## Example Output
 
-AERIAL LOCOMOTION
-  Wing Span: 1.8 m
-  Wing Area: 0.34 m²
-  Wing Loading: 70.5 N/m²
-  Wingbeat Frequency: 12.3 Hz
-  Min Flight Speed (stall): 8.5 m/s
-  Cruise Speed: 15.2 m/s
-  Max Flight Speed: 22.8 m/s
-  Hovering Efficiency: 0.0 (not viable)
-  Flapping Efficiency: 0.85
+    $ tonton-analyze penguin.glb --env=ocean --social=1 --density=0.67
+    === TonTon Output ===
 
-METABOLIC
-  Basal Rate: 18.5 W
-  Max Rate: 277.5 W
-  Aerobic Scope: 15.0x
-  Muscle Mass: 1.10 kg (45% of body)
-  Available Power: 440 W
+    Physical:
+      body_mass_kg: 44.519310
+      svl_m: 1.056918
+      total_length_m: 1.056918
+      body_volume_m3: 0.047640
+      surface_area_m2: 1.002580
+      cross_sectional_area_m2: 0.065058
+      cross_sectional_diameter: 0.287810
+      fineness_ratio: 3.672272
 
-BEHAVIOR
-  AI Archetype: AERIAL_PREDATOR
-  Aggression: 0.72
-  Social Tendency: 0.25 (solitary)
-  Activity Level: 0.68
-  Diurnal Preference: 0.80 (diurnal)
-  Is Migratory: false
+    Metabolic:
+      basal_rate_W: 96.124687
+      max_rate_W: 961.246887
+      aerobic_scope: 10.000000
+      muscle_mass_kg: 17.807724
+      available_muscle_power_W: 5342.317383
+      is_endotherm: true
+      body_temperature_K: 313.149994
+      thermal_neutral_zone_min_K: 306.129272
+      thermal_neutral_zone_max_K: 320.170715
 
-SENSORY SYSTEMS
-  Vision Acuity: 0.85
-  Binocular Overlap: 0.65
-  Detection Range: 450 m
-  Has Color Vision: true
-  Has Night Vision: false
-...
-```
+    Behavior:
+      aggression: 0.700000
+      social_tendency: 1.000000
+      activity_level: 0.500000
+      curiosity: 0.500000
+      territoriality: 0.200000
+      diurnal_preference: 0.800000
+      is_migratory: false
+      suggested_archetype: SCHOOLING_PREY
+
+    Sensory:
+      vision.acuity: 0.594350
+      vision.binocular_overlap: -0.139161
+      vision.has_color_vision: true
+      vision.has_night_vision: true
+      vision.detection_range_m: 21.545948
+      hearing.sensitivity: 0.750000
+      hearing.frequency_range_Hz: 100.000000 - 10000.000000
+      hearing.detection_range_m: 13.594221
+
+    Diagnostics:
+      overall_confidence: 1.000000
+      passes_power_budget_check: true
+      passes_mass_budget_check: true
+      is_physically_plausible: true
+
+    Terrestrial:
+      posture: 0.0031558275
+      can_breathe_while_running: true
+      legs:
+        Manipulator(root:16 tip:18 reach:0.330057m grip:403.294342N)
+        Manipulator(root:20 tip:22 reach:0.330272m grip:401.131317N)
+      max_sprint_speed_m_s: 8.983645
+      max_sustainable_speed_m_s: 5.381682
+      optimal_speed_m_s: 3.7671773
+
+    Aerial:
+      wings:
+    Wing(root: 11 tip: 12 span: 0.288044 m area: 0.031408 m² chord length: 0.104414 m AR: 5.283412)
+    Wing(root: 14 tip: 15 span: 0.304426 m area: 0.031442 m² chord length: 0.102698 m AR: 5.894941)
+      wingbeat_frequency_Hz: 2.45735
+      can_sustain_level_flight: yes
+      can_slow_descent: yes
+      can_hover: yes
+      speeds (min/cruise/max): 0.0035239602/1.6985582/3.0574048 m/s
+      turning radius: 2.1138363 m
+      manuverability (roll/pitch/yaw): 0.2447233/0.004591733/0.1455515 rad/s
+      power (flap/hover): 224.49667/47.374187 W
+
+    Aquatic:
+      propulsion_mode: PADDLE_LIMBS
+
+      === KINEMATICS ===
+      tail_beat_frequency: 1.4590514 Hz
+      tail_amplitude: 0.26422954 m (11.488241% body length)
+      speeds (min/cruise/burst): 0/1.2850815/11.701575 m/s
+
+      === HYDRODYNAMICS ===
+      Reynolds_number: 1301104.2 (turbulent/inertial)
+      drag_coefficient: 0.04 (highly streamlined)
+
+      === BUOYANCY ===
+      neutral_buoyancy_density: 1025 kg/m³
+      has_swim_bladder: no
+      buoyancy: neutral or positive
+
+      === MANEUVERABILITY ===
+      min_turning_radius: 0.22445592 m
+      can_hover: no
+
+      === PROPULSORS ===
+          Fin(root:11 tip:12 area:0.031408m²)
+          Fin(root:14 tip:15 area:0.031442m²)
+
+    Jumping:
+      mechanism: MUSCLE_DIRECT
+      max_jump_height_m: 0.258188
+      max_jump_distance_m: 0.596259
+      takeoff_velocity_m_s: 2.598882
+
+    Appendages:
+      tails:
+        Tail(root:19 tip:19 len:0.12621707m)
 
 ## Example Workflow
 
@@ -268,7 +331,7 @@ SENSORY SYSTEMS
 ./rintintin-analyze dragon.gltf
 
 # Step 2: View debug visualization (optional)
-# Open dragon.gltf-balls.glb in a GLTF viewer
+# Open dragon.gltf-tensors.glb in a GLTF viewer
 # You'll see ellipsoids representing inertia tensors for each joint
 
 # Step 3: Run creature analysis with default parameters

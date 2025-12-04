@@ -62,6 +62,19 @@ TonTon::Environment parseEnvironment(const std::string& env_str)
     else if (env_lower == "wolf" || env_lower == "wolf1061c") return TonTon::createWolf1061c();
     else if (env_lower == "gliese" || env_lower == "gliese667cc") return TonTon::createGliese667Cc();
     else if (env_lower == "europa" || env_lower == "icy") return TonTon::createIcyMoonOcean();
+    else if (env_lower == "carboniferous" || env_lower == "carb") {
+    
+		auto env = TonTon::createEarthAir();
+		env.temperature_K = TonTon::temp_K(303);
+		env.fluidDensity_Kg_m3 *= 1.6;
+		return env;
+    }
+    else if (env_lower == "warm-titan") 
+    {
+		auto env = TonTon::createTitan();
+		env.temperature_K=TonTon::createEarthAir().temperature_K;
+		return env;
+    }
     else {
         std::cerr << "Unknown environment: " << env_str << ", defaulting to air\n";
         return TonTon::createEarthAir();
@@ -79,7 +92,7 @@ int main(int argc, char* argv[])
             ;
 
         options.add_options("Environment")
-            ("env", "Environment preset (air, ocean, titan, centauri, trappist, 422b, lhs, 62f, 18b, wolf, gliese, europa)",
+            ("env", "Environment preset (air, ocean, titan, centauri, trappist, 422b, lhs, 62f, 18b, wolf, gliese, europa, warm-titan)",
              cxxopts::value<std::string>()->default_value("air"))
             ;
 
