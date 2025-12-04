@@ -2,6 +2,8 @@ build
 *-output.bin
 *-output.gltf
 *-tensors.glb
+.claude
+CLAUDE.md
 
 # Prerequisites
 *.d

@@ -171,7 +171,7 @@ void SaveFile(fx::gltf::Document & doc, std::filesystem::path const& path)
 			}
 			else
 			{
-				buf.uri = std::filesystem::path(path).replace_extension(".bin");
+				buf.uri = std::filesystem::path(path).filename().replace_extension(".bin");
 			}
 		}
 					
