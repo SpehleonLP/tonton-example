@@ -30,6 +30,9 @@ add_subdirectory(modules/rintintin)
 # tonton (Apache-2.0) - Biomechanical analysis (includes dodeedum submodule)
 add_subdirectory(modules/tonton)
 
+# chacha - Joint articulation constraints from animation data
+add_subdirectory(modules/chacha)
+
 # ============================================================================
 # Gather source files for bridge libraries
 # ============================================================================
@@ -112,9 +115,36 @@ endif()
 target_link_libraries(tonton-analyze PRIVATE Threads::Threads)
 
 # ============================================================================
+# chacha-example executable
+# ============================================================================
+set(CHACHA_SOURCES
+    src/chacha_main.cpp
+    src/chacha_fxgltf_bridge.cpp
+)
+
+add_executable(chacha-example ${CHACHA_SOURCES})
+
+target_include_directories(chacha-example PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
+    ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
+    ${CMAKE_SOURCE_DIR}/modules/chacha/include
+    ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
+)
+
+target_link_libraries(chacha-example PRIVATE
+    chacha
+    fx-gltf
+)
+
+if(glm_FOUND)
+    target_link_libraries(chacha-example PRIVATE glm::glm)
+endif()
+
+# ============================================================================
 # Installation (optional)
 # ============================================================================
-install(TARGETS rintintin-analyze tonton-analyze
+install(TARGETS rintintin-analyze tonton-analyze chacha-example
     RUNTIME DESTINATION bin
 )
 
@@ -132,10 +162,12 @@ message(STATUS "  - fx-gltf (MIT)")
 message(STATUS "  - rintintin (GPL-2.0)")
 message(STATUS "  - tonton (Apache-2.0)")
 message(STATUS "    - dodeedum (MIT)")
+message(STATUS "  - chacha")
 message(STATUS "")
 message(STATUS "Executables to build:")
 message(STATUS "  - rintintin-analyze: Volumetric analysis + debug visualization")
 message(STATUS "  - tonton-analyze: Biomechanical creature analysis")
+message(STATUS "  - chacha-example: Joint articulation constraints from animation data")
 message(STATUS "")
 message(STATUS "NOTE: This project is GPL-2.0 licensed due to rintintin dependency")
 message(STATUS "=============================================================================")

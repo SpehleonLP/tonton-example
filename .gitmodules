@@ -10,3 +10,6 @@
 [submodule "modules/cxxopts"]
 	path = modules/cxxopts
 	url = https://github.com/jarro2783/cxxopts.git
+[submodule "modules/chacha"]
+	path = modules/chacha
+	url = https://github.com/SpehleonLP/ChaCha
