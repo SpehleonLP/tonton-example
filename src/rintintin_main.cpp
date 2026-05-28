@@ -131,7 +131,7 @@ bool OpenFile(fx::gltf::Document & doc, std::filesystem::path const& path)
 	if(extension == ".gltf")
 		doc = fx::gltf::LoadFromText(path);
 	else if(extension == ".glb")
-		doc = fx::gltf::LoadFromBinary(path);
+		doc = fx::gltf::LoadFromBinary(path, fx::gltf::ReadQuotas{~0u, ~0u, ~0u});
 	else
 	{
 		throw std::runtime_error("file is not a gltf file");
