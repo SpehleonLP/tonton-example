@@ -28,12 +28,11 @@ namespace LF
 	{
 		ReadField(volume);
 		ReadField(centroid);
-		ReadField(inertia);
-		
+		ReadField(secondMoment);
+
 		ReadOptField(surfaceArea);
 		ReadOptField(min);
 		ReadOptField(max);
-		ReadOptField(covariance);
 	}
 	
 	inline void to_json(nlohmann::json & json, Transform const& db)
@@ -53,12 +52,11 @@ namespace LF
 	{
 		WriteReqField(volume);
 		WriteReqField(centroid);
-		WriteReqField(inertia);
-		
+		WriteReqField(secondMoment);
+
 		WriteOptField(surfaceArea, 0.f);
 		WriteOptField(min, fx::gltf::defaults::NullVec3);
 		WriteOptField(max, fx::gltf::defaults::NullVec3);
-		WriteOptField(covariance, fx::gltf::defaults::NullVec3);
 	}
 	
 	

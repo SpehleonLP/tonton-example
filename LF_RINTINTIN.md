@@ -14,7 +14,7 @@ Written against the glTF 2.0 spec.
 
 ## Overview
 
-This extension provides per-joint geometric and physical properties for skinned meshes. It enables accurate physics simulation, procedural collider generation, and biomechanical analysis of rigged characters by storing precomputed inertial properties, bounding volumes, and statistical metrics for each joint's influenced geometry.
+This extension provides per-joint geometric and physical properties for skinned meshes. It enables accurate physics simulation, procedural collider generation, and biomechanical analysis of rigged characters by storing precomputed bounding volumes and the second moment tensor (from which an inertia tensor is trivially derived) for each joint's influenced geometry.
 
 Traditional approaches require runtime computation of these properties or rely on artist-authored approximations. This extension solves the problem by providing mathematically rigorous metrics computed from the actual mesh geometry, even for topologically complex or non-manifold meshes common in game assets.
 
@@ -28,7 +28,7 @@ Skinned mesh characters in games and simulations often require physical properti
 - **Animation retargeting**: Understanding mass distribution for IK solvers
 - **Optimization**: Per-joint culling and LOD decisions
 
-Computing inertia tensors and geometric properties at runtime is expensive. Artist-authored colliders are time-consuming and error-prone. This extension provides these properties as preprocessed data.
+Computing second moment / inertia tensors and geometric properties at runtime is expensive. Artist-authored colliders are time-consuming and error-prone. This extension provides these properties as preprocessed data.
 
 ## Placement
 
@@ -60,17 +60,16 @@ All three property arrays are optional, but at least one must be present if the 
 
 ### Metrics
 
-Per-joint geometric and inertial properties. All metrics are computed in unit-density and the local space of the node.
+Per-joint geometric properties. All metrics are computed at unit density in the local space of the node.
 
 |   |Type|Unit|Description|Required|
 |---|----|----|-----------|--------|
-|**volume**|`number`| m^3 |Volume in cubic meters of geometry influenced by this joint|No, default: `0.0`|
-|**surfaceArea**|`number`| m^2 |Surface area in square meters of geometry influenced by this joint|No, default: `0.0`|
+|**volume**|`number`| m^3 |Volume of geometry influenced by this joint|No, default: `0.0`|
+|**surfaceArea**|`number`| m^2 |Surface area of geometry influenced by this joint|No, default: `0.0`|
 |**centroid**|`number[3]`| m |Center of mass in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
-|**inertia**|`number[6]` | (\(\rho\)= 1 ) * (volume m^3) * m^2 = m^5 |Inertia tensor components `[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]` in kg⋅m² relative to the centroid|No, default: `[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]`|
 |**min**|`number[3]` | m |Minimum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
 |**max**|`number[3]`| m | Maximum corner of axis-aligned bounding box in node-local coordinates|No, default: `[0.0, 0.0, 0.0]`|
-|**covariance**|`number[3]`| m^5 | Diagonal elements of covariance matrix `[Cxx, Cyy, Czz]` off-diagonal are not stored because they're the same as inertia. meaning this is pre-multiplied by volume. (should it be changed to only have 6-value non-multipied covariance??)|No, default: `[0.0, 0.0, 0.0]`|
+|**secondMoment**|`number[6]`| m^5 |Second moment tensor `[Mxx, Myy, Mzz, Mxy, Mxz, Myz]` about the centroid, where `M_ij = integral (x_i - c_i)(x_j - c_j) dV`. Pre-multiplied by volume (assumes unit density); has units m^5. See "Deriving an inertia tensor" below.|No, default: `[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]`|
 
 **Example:**
 
@@ -80,24 +79,40 @@ Per-joint geometric and inertial properties. All metrics are computed in unit-de
     "volume": 0.00024,
     "surfaceArea": 0.045,
     "centroid": [0.0, 0.15, 0.0],
-    "inertia": [0.00012, 0.00015, 0.00008, 0.0, 0.0, 0.0],
     "min": [-0.05, 0.1, -0.05],
     "max": [0.05, 0.2, 0.05],
-    "covariance": [0.0008, 0.0012, 0.0008]
+    "secondMoment": [0.0008, 0.0012, 0.0008, 0.0, 0.0, 0.0]
   }
 ]
 ```
 
+#### Deriving an inertia tensor
+
+This is the main thing you will want to do with the second moment tensor. Note the
+sign flip on off-diagonal terms — these go in opposite directions in the two
+tensors:
+
+```
+Ixx = M.yy + M.zz       Ixy = -M.xy
+Iyy = M.xx + M.zz       Ixz = -M.xz
+Izz = M.xx + M.yy       Iyz = -M.yz
+```
+
+equivalently, `I = trace(M) * Identity - M` (with the standard physics sign
+convention on off-diagonals). Both `M` and the resulting `I` are already volume-
+weighted; multiply by material density to obtain a physical inertia tensor in
+kg⋅m².
+
 ### Eigen Decompositions
 
-Principal axes and eigenvalues of the inertia tensor, useful for oriented collider generation.
+Principal axes and eigenvalues of the second moment tensor, useful for oriented collider generation. (The second moment and inertia tensors share eigenvectors — they are simultaneously diagonalizable — so the rotation is equally valid as a frame for either.)
 
 |   |Type|Description|Required|
 |---|----|-----------|--------|
 |**rotation**|`number[4]`|Quaternion (x, y, z, w) representing the principal axes orientation|Yes|
 |**lambda**|`number[3]`|Eigenvalues `[λ_min, λ_mid, λ_max]` in ascending order|Yes|
 
-The rotation quaternion transforms from node-local space to the principal axes frame where the inertia tensor is diagonal.
+The rotation quaternion transforms from node-local space to the principal axes frame where the second moment tensor (and therefore the inertia tensor) is diagonal.
 
 **Example:**
 
@@ -151,11 +166,11 @@ This extension is designed to work with real-world game assets that may have non
 
 ### Mass and Density
 
-The extension stores geometric properties (volume, inertia) but not mass directly. Applications should apply material density to convert volume to mass:
+The extension stores geometric properties (volume, second moment) but not mass directly. Applications should apply material density to convert volume to mass and to scale the derived inertia tensor:
 
 ```
 mass = density × volume
-scaled_inertia = (density × inertia) 
+inertia_kgm2 = density × (trace(M) * Id - M)
 ```
 
 For biomechanical analysis, typical densities:
@@ -166,15 +181,17 @@ For biomechanical analysis, typical densities:
 
 ### Coordinate System Conventions
 
-glTF uses a right-handed coordinate system with +Y up, +Z forward (towards viewer), and +X right. Inertia tensors follow standard conventions:
+glTF uses a right-handed coordinate system with +Y up, +Z forward (towards viewer), and +X right.
+
+The `secondMoment` array stores `[Mxx, Myy, Mzz, Mxy, Mxz, Myz]` as the symmetric matrix:
 
 ```
-     | Ixx  -Ixy  -Ixz |
-I =  | -Ixy  Iyy  -Iyz |
-     | -Ixz -Iyz   Izz |
+     | Mxx  Mxy  Mxz |
+M =  | Mxy  Myy  Myz |
+     | Mxz  Myz  Mzz |
 ```
 
-The `inertia` array stores `[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]` where off-diagonal terms are stored without negation.
+All entries are non-negated integrals. The corresponding inertia tensor follows the standard physics sign convention with negated off-diagonals (see "Deriving an inertia tensor" above).
 
 ## Schema
 
@@ -222,8 +239,13 @@ def compute_body_properties(animated_joints, rintintin_data):
         weighted_centroid += mass * world_centroid
         total_mass += mass
         
-        # Transform and accumulate inertia tensor (parallel axis theorem)
-        I_local = to_matrix(metrics.inertia)
+        # Build inertia tensor from second moment (flip signs on off-diagonals!)
+        M = metrics.secondMoment   # [Mxx, Myy, Mzz, Mxy, Mxz, Myz]
+        I_local = matrix([
+            [ M[1]+M[2], -M[3],     -M[4]    ],
+            [-M[3],       M[0]+M[2], -M[5]    ],
+            [-M[4],      -M[5],      M[0]+M[1]],
+        ])
         I_world = joint_transform.rotation * I_local * joint_transform.rotation.T
         total_inertia += I_world + parallel_axis_term(mass, world_centroid)
     

@@ -109,7 +109,7 @@ void VisualizeTensors(RintintinCommand const& command, fx::gltf::Document& doc)
 			};
 			
 		mesh_nodes[i].extensionsAndExtras["extras"]["volume"] = metrics[i].volume;	
-		mesh_nodes[i].extensionsAndExtras["extras"]["covariance"] = (std::array<double, 3>&)metrics[i].covariance;
+		mesh_nodes[i].extensionsAndExtras["extras"]["secondMoment"] = (std::array<double, 6>&)metrics[i].second_moment;
 	}
     
 	// Create scene and add root nodes

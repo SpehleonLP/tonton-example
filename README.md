@@ -8,7 +8,7 @@ This repository provides command-line tools that demonstrate the complete pipeli
 ```
 GLTF file (rigged character)
     ↓
-rintintin (computes volumes, inertia, covariance matrices)
+rintintin (computes volumes, centroids, second moment tensors)
     ↓
 GLTF + LF_RINTINTIN extension (enriched with volumetric data)
     ↓
@@ -39,14 +39,13 @@ rintintin-analyze <input.gltf>
 ```
 
 **Output:**
-- Creates `<input.gltf>-balls.glb` - Debug visualization with inertia tensors rendered as ellipsoids
+- Creates `<input.gltf>-balls.glb` - Debug visualization with second moment tensors rendered as ellipsoids
 - Adds `LF_RINTINTIN` extension to the original GLTF (when used with `-o` flag)
 
 **What it computes:**
 - Volume and surface area per joint
 - 3D centroid (center of mass)
-- Inertia tensor (6 values: Ixx, Iyy, Izz, Ixy, Ixz, Iyz)
-- Covariance matrix (3 eigenvalues)
+- Second moment tensor (6 values: Mxx, Myy, Mzz, Mxy, Mxz, Myz) — convert to inertia via `I = trace(M)·Id − M`, off-diagonals flip sign
 - Eigendecomposition (rotation + lambda values)
 - Oriented bounding boxes
 - Axis-aligned bounding boxes (min, max)
@@ -66,10 +65,9 @@ Structure:
           "volume": 0.0234,
           "surfaceArea": 0.456,
           "centroid": [0.0, 0.5, 0.0],
-          "inertia": [0.001, 0.002, 0.0015, 0.0, 0.0, 0.0],
           "min": [-0.1, 0.0, -0.1],
           "max": [0.1, 1.0, 0.1],
-          "covariance": [0.5, 0.3, 0.2]
+          "secondMoment": [0.5, 0.3, 0.2, 0.0, 0.0, 0.0]
         }
       ],
       "eigenDecompositions": [
@@ -332,7 +330,7 @@ tonton-analyze --env ocean *.gltf
 
 # Step 2: View debug visualization (optional)
 # Open dragon.gltf-tensors.glb in a GLTF viewer
-# You'll see ellipsoids representing inertia tensors for each joint
+# You'll see ellipsoids representing the second moment tensor for each joint
 
 # Step 3: Run creature analysis with default parameters
 ./tonton-analyze dragon.gltf > dragon-analysis.txt
@@ -436,9 +434,9 @@ For best results, your GLTF models should:
 ## Debug Visualization
 
 The `rintintin` tool creates a debug visualization file (`*-balls.glb`) that shows:
-- **Ellipsoids** representing the inertia tensor for each joint
+- **Ellipsoids** representing the second moment tensor for each joint (same principal axes as the derived inertia tensor)
 - Oriented to match the principal axes of rotation
-- Scaled according to the eigenvalues (larger = more rotational inertia)
+- Scaled according to the eigenvalues (larger = more mass spread along that axis)
 
 This is useful for:
 - Verifying the volumetric analysis is correct

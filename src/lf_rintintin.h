@@ -37,10 +37,11 @@ struct RinTinTin
 		float surfaceArea{}; 
 		
 		std::array<float, 3> centroid{0};
-		std::array<float, 6> inertia{0}; // xx yy zz xy xz yz, assumes unit density.
-		
-		std::array<float, 3> min, max{0};	 // AABB of affected verticies	
-		std::array<float, 3> covariance{0}; // trace of covariance, can get the rest from inertia
+		std::array<float, 3> min, max{0};	 // AABB of affected verticies
+		// Second moment tensor about the centroid: integral of (x-c)(x-c)^T dV.
+		// Layout: xx yy zz xy xz yz. Units m^5 (pre-multiplied by volume, unit density).
+		// Inertia tensor recovered as: I = trace(M)*Id - M (off-diagonals negated).
+		std::array<float, 6> secondMoment{0};
 	
 		inline bool empty() const { return false; } 
 	};

@@ -1,5 +1,8 @@
 #include <iostream>
 #include <filesystem>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 #include "gltf_rintintin_bridge.h"
 #include "primitives.h"
 #include "lf_rintintin.h"
@@ -80,10 +83,56 @@ std::vector<Arguments> GetArguments(int argc, const char * args[])
 	return r;
 }
 
+static void PrintUsage(const char * prog)
+{
+	std::fprintf(stderr,
+		"rintintin-analyze — per-joint volumetric / second-moment analysis for skinned glTF\n"
+		"\n"
+		"Usage:\n"
+		"  %s [options] <input.glb|input.gltf> [<input2> ...]\n"
+		"\n"
+		"For each input file, writes:\n"
+		"  <input>-output.gltf   skeleton + tensor visualization with LF_RINTINTIN extension\n"
+		"\n"
+		"Options (apply to the input file that follows):\n"
+		"  -o <path>     override output path for the next input\n"
+		"  -v [<path>]   also emit a tensor-visualization .glb\n"
+		"                no path = <input>-tensors.glb\n"
+		"\n"
+		"Multiple inputs may be chained; each set of flags applies to the next positional arg.\n"
+		"\n"
+		"Environment variables (debug instrumentation):\n"
+		"  RTT_PROBE_JOINT=<joint_name>\n"
+		"      For each skinned-mesh node, dumps to stderr:\n"
+		"        [rtt-ibm]    every joint's parent, IBM-derived origin, and name\n"
+		"        [rtt-vprobe] every vertex whose weights touch <joint_name>:\n"
+		"                       position, joint slots, weight slots, total wt_to_target\n"
+		"      Use to compare two files: redirect stderr and diff.\n"
+		"      Example:\n"
+		"        RTT_PROBE_JOINT=\"mixamorig:RightHandThumb2\" %s in.glb 2> probe.log\n"
+		"\n"
+		"Exit: 0 on success; per-file errors are logged to stderr and processing continues.\n",
+		prog, prog);
+}
+
 int main(int argc,const char * args[])
 {
+	if(argc < 2
+	|| std::strcmp(args[1], "-h") == 0
+	|| std::strcmp(args[1], "--help") == 0)
+	{
+		PrintUsage(args[0]);
+		return argc < 2 ? 1 : 0;
+	}
+
 	auto argv = GetArguments(argc, args);
-	
+
+	if(argv.empty())
+	{
+		std::fprintf(stderr, "%s: no valid input files. Use -h for usage.\n", args[0]);
+		return 1;
+	}
+
 	for(auto & arg : argv)
 	{
 		try
@@ -215,6 +264,53 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 				
 		auto skin = createRintintinSkinFromSkin(src, src.nodes[i].skin);
 		std::vector<rintintin_metrics> metrics(skin.skin.no_joints);
+
+		// [rtt-vprobe] Dump per-vertex weights touching a target joint.
+		// Enabled by env RTT_PROBE_JOINT="mixamorig:RightShoulder" (or any joint name).
+		if (const char * tgt = std::getenv("RTT_PROBE_JOINT"))
+		{
+			int target = -1;
+			for (uint32_t j = 0; j < skin.skin.no_joints; ++j)
+				if (skin.skin.bone_names[j] && std::strcmp(skin.skin.bone_names[j], tgt) == 0)
+					{ target = int(j); break; }
+			std::fprintf(stderr, "[rtt-vprobe] node=%s target='%s' idx=%d (mesh=%d, prims=%zu)\n",
+				src.nodes[i].name.c_str(), tgt, target,
+				src.nodes[i].mesh, meshes.size());
+			if (target >= 0)
+			{
+				for (size_t mi = 0; mi < meshes.size(); ++mi)
+				{
+					auto const& M  = meshes[mi];
+					auto const* JA = (rintintin_attrib const*)M.joints_user_data;
+					auto const* WA = (rintintin_attrib const*)M.weights_user_data;
+					auto const* PA = (rintintin_attrib const*)M.position_user_data;
+					size_t hits = 0;
+					for (uint32_t v = 0; v < M.no_verts; ++v)
+					{
+						int32_t J[4] = {0,0,0,0};
+						double  W[4] = {0,0,0,0};
+						double  P[4] = {0,0,0,0};
+						rintintin_read_attrib_generic_i(J, v, JA);
+						rintintin_read_attrib_generic_f(W, v, WA);
+						rintintin_read_attrib_generic_f(P, v, PA);
+						double wt = 0;
+						for (int s = 0; s < 4; ++s)
+							if (J[s] == target) wt += W[s];
+						if (wt > 0)
+						{
+							++hits;
+							std::fprintf(stderr,
+								"[rtt-vprobe] prim=%zu v=%u P=(%.4f,%.4f,%.4f) J=(%d,%d,%d,%d) W=(%.4f,%.4f,%.4f,%.4f) wt_to_target=%.4f\n",
+								mi, v, P[0], P[1], P[2],
+								J[0], J[1], J[2], J[3],
+								W[0], W[1], W[2], W[3], wt);
+						}
+					}
+					std::fprintf(stderr, "[rtt-vprobe] prim=%zu vertices_touching_target=%zu / %zu\n",
+						mi, hits, (size_t)M.no_verts);
+				}
+			}
+		}
 		
 		std::vector<uint8_t> scratch_space;
 		rintintin_process_command cmd;

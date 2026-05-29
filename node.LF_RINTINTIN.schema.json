@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "LF_RINTINTIN Node Extension",
   "type": "object",
-  "description": "Per-joint geometric and inertial properties for skinned meshes.",
+  "description": "Per-joint geometric and second-moment properties for skinned meshes.",
   "properties": {
     "metrics": {
       "type": "array",
-      "description": "Geometric and inertial metrics per joint. Array length must match number of joints in the skin.",
+      "description": "Geometric and second-moment metrics per joint. Array length must match number of joints in the skin.",
       "items": {
         "type": "object",
         "properties": {
@@ -32,16 +32,6 @@
             "maxItems": 3,
             "default": [0.0, 0.0, 0.0]
           },
-          "inertia": {
-            "type": "array",
-            "description": "Inertia tensor [Ixx, Iyy, Izz, Ixy, Ixz, Iyz] in kg⋅m²",
-            "items": {
-              "type": "number"
-            },
-            "minItems": 6,
-            "maxItems": 6,
-            "default": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-          },
           "min": {
             "type": "array",
             "description": "AABB minimum corner [x, y, z]",
@@ -62,22 +52,22 @@
             "maxItems": 3,
             "default": [0.0, 0.0, 0.0]
           },
-          "covariance": {
+          "secondMoment": {
             "type": "array",
-            "description": "Diagonal covariance matrix elements [Cxx, Cyy, Czz]",
+            "description": "Second moment tensor [Mxx, Myy, Mzz, Mxy, Mxz, Myz] = integral of (x-centroid)(x-centroid)^T dV over the joint-influenced volume. Units m^5; not normalized by volume.",
             "items": {
               "type": "number"
             },
-            "minItems": 3,
-            "maxItems": 3,
-            "default": [0.0, 0.0, 0.0]
+            "minItems": 6,
+            "maxItems": 6,
+            "default": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
           }
         }
       }
     },
     "eigenDecompositions": {
       "type": "array",
-      "description": "Principal axes and eigenvalues of inertia tensors per joint.",
+      "description": "Principal axes and eigenvalues of the second moment tensor per joint.",
       "items": {
         "type": "object",
         "properties": {

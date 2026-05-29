@@ -2,6 +2,9 @@
 #include "fx/gltf.h"
 #include <glm/mat4x4.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <span>
 
 using GLTFAttributeData = RTT::GLTFAttributeData;
@@ -75,7 +78,9 @@ rintintin_attrib createRintintinAttrib(const GLTFAttributeData& gltfData) {
     
     rintintin_attrib attrib = {};
     attrib.src = const_cast<void*>(static_cast<const void*>(gltfData.data));
-    attrib.byte_length = gltfData.bufferView->byteLength;
+    // data is already advanced past accessor.byteOffset; shrink byte_length to match
+    // so the lib's OOB check matches the actual readable region.
+    attrib.byte_length = gltfData.bufferView->byteLength - gltfData.accessor->byteOffset;
     attrib.type = gltfToRinTinTinType(gltfData.accessor->componentType);
     attrib.size = getComponentCount(gltfData.accessor->type);
     attrib.normalized = gltfData.accessor->normalized ? 1 : 0;
@@ -265,8 +270,9 @@ RintintinSkinData createRintintinSkinFromSkin(
         
         for(auto child : jointNode.children)
         {
-			int childNode = nodeToJointMap[child];
-			result.parents[childNode] = i;
+			auto it = nodeToJointMap.find(child);
+			if (it != nodeToJointMap.end())
+				result.parents[it->second] = i;
         }
         
     }
@@ -304,19 +310,36 @@ RintintinSkinData createRintintinSkinFromSkin(
 		};
 		
         // Verify the accessor has the right format for matrices
-        if (accessor.type == fx::gltf::Accessor::Type::Mat4 && 
+        if (accessor.type == fx::gltf::Accessor::Type::Mat4 &&
             accessor.componentType == fx::gltf::Accessor::ComponentType::Float &&
             accessor.count == jointCount) {
-            
-            const float* matrixData = reinterpret_cast<const float*>(inverseBindMatrices.data);
-            
-            // Extract positions from inverse bind matrices
+
+            // Respect bufferView.byteStride; fall back to tight packing.
+            size_t matStride = inverseBindMatrices.bufferView->byteStride;
+            if (matStride == 0) matStride = 64;
+
             for (size_t i = 0; i < jointCount; ++i) {
-                // Each matrix is 16 floats, we want the inverse of the translation part
-                const float* matrix = matrixData + (i * 16);
-                
+                float matrix[16];
+                std::memcpy(matrix,
+                    inverseBindMatrices.data + i * matStride,
+                    sizeof(matrix));
                 result.origins[i] = getInverseTranslation(matrix, (i < rotations.size())? &rotations[i] : nullptr);
             }
+
+            if (std::getenv("RTT_PROBE_JOINT"))
+            {
+                std::fprintf(stderr, "[rtt-ibm] skin %d  matStride=%zu  jointCount=%zu\n",
+                    skinIndex, matStride, jointCount);
+                for (size_t i = 0; i < jointCount; ++i) {
+                    const char * nm = result.names[i] ? result.names[i] : "?";
+                    std::fprintf(stderr, "[rtt-ibm]   j[%2zu] parent=%3d  origin=(% .5f,% .5f,% .5f)  %s\n",
+                        i, result.parents[i],
+                        result.origins[i].x, result.origins[i].y, result.origins[i].z, nm);
+                }
+            }
+        } else if (accessor.count != jointCount) {
+            throw std::runtime_error(
+                "inverseBindMatrices accessor count does not match skin joint count");
         }
     }
     
@@ -511,25 +534,24 @@ LF::RinTinTin::Metrics LF::Factory(rintintin_metrics const& it)
 	r.surfaceArea = it.surfaceArea;
 	
 	(glm::vec3&)r.centroid = (glm::dvec3&)it.centroid;
-	r.inertia = {
-		(float)it.inertia.xx,
-		(float)it.inertia.yy,
-		(float)it.inertia.zz,
-		(float)it.inertia.xy,
-		(float)it.inertia.xz,
-		(float)it.inertia.yz,
-	};	
-	
+	r.secondMoment = {
+		(float)it.second_moment.xx,
+		(float)it.second_moment.yy,
+		(float)it.second_moment.zz,
+		(float)it.second_moment.xy,
+		(float)it.second_moment.xz,
+		(float)it.second_moment.yz,
+	};
+
 	(glm::vec3&)r.min = (glm::dvec3&)it.aabb_min;
 	(glm::vec3&)r.max = (glm::dvec3&)it.aabb_max;
-	(glm::vec3&)r.covariance = (glm::dvec3&)it.covariance;
 
 	return r;
 }
 
 LF::RinTinTin::Eigen LF::MakeEigen(const rintintin_metrics &it)
 {
-	auto eigen = rintintin_compute_eigen(&it.inertia);
+	auto eigen = rintintin_compute_eigen(&it.second_moment);
 	auto quat = rintintin_compute_rotation_quat(&eigen);
 		
 	return LF::RinTinTin::Eigen{

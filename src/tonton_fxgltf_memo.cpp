@@ -148,16 +148,10 @@ TonTon::GltfMemo::GltfMemo(std::shared_ptr<const fx::gltf::Document> document_fi
 					shared_array<float>::Build(N, [&metrics](int j) -> float { return metrics[j].volume; }),
 					//centroids
 					shared_array<glm::vec3>::Build(N, [&metrics](int j) -> glm::vec3 { return (glm::dvec3&)metrics[j].centroid; }),
-					//intertia
-					shared_array<std::array<float, 6>>::Build(N, [&metrics](int j) -> std::array<float, 6> { 
-							auto &I = metrics[j].inertia;
-							auto &C = metrics[j].covariance;
-						
-							return {
-								 C[0], C[1], C[2],
-								-I[3],-I[4],-I[5]
-							};
-						})		
+					//second moment tensor (tonton convention: xx yy zz xy xz yz, true covariance signs)
+					shared_array<std::array<float, 6>>::Build(N, [&metrics](int j) -> std::array<float, 6> {
+							return metrics[j].secondMoment;
+						})
 					);
 			
 			}
@@ -195,16 +189,14 @@ counted_ptr<const TonTon::SkinnedMesh> TonTon::GltfMemo::operator[](int idx) con
 		shared_array<float>::Build(N, [&metrics](int i) -> float { return metrics[i].volume; }),
 		//centroids
 		shared_array<glm::vec3>::Build(N, [&metrics](int i) -> glm::vec3 { return (glm::dvec3&)metrics[i].centroid; }),
-		//covariance
-		shared_array<std::array<float, 6>>::Build(N, [&metrics](int i) -> std::array<float, 6> { 
-				auto &I = metrics[i].inertia;
-				auto &C = metrics[i].covariance;
-			// intertia computed with unit density
+		//second moment tensor (tonton convention: xx yy zz xy xz yz, unit density)
+		shared_array<std::array<float, 6>>::Build(N, [&metrics](int i) -> std::array<float, 6> {
+				auto &M = metrics[i].second_moment;
 				return {
-					float( C.x ),float( C.y ),float( C.z ),
-					float(-I.xy),float(-I.xz),float(-I.yz)
+					float(M.xx), float(M.yy), float(M.zz),
+					float(M.xy), float(M.xz), float(M.yz)
 				};
-			})		
+			})
 	);
 		
 	return _nodes[idx].skinnedMesh;
