@@ -142,6 +142,67 @@ if(glm_FOUND)
 endif()
 
 # ============================================================================
+# tonton-tests: GTest plausibility suite over the sample models
+# ============================================================================
+option(TONTON_BUILD_TESTS "Build the tonton plausibility test suite" ON)
+
+if(TONTON_BUILD_TESTS)
+    find_package(GTest QUIET)
+
+    if(NOT GTest_FOUND)
+        message(STATUS "GTest not found via find_package; skipping tonton-tests target")
+    else()
+        enable_testing()
+
+        # Same pipeline sources tonton-analyze uses, minus the CLI main().
+        set(TONTON_TEST_PIPELINE_SOURCES
+            src/get_armatures_from_files.cpp
+            src/tonton_fxgltf_memo.cpp
+            src/gltf_rintintin_bridge.cpp
+            modules/tonton/modules/dodeedum/extensions/dodeedum_fxgltf_bridge.cpp
+            ${COMMON_SOURCES}
+        )
+
+        add_executable(tonton-tests
+            tests/tonton_plausibility_tests.cpp
+            tests/tonton_geometry_tests.cpp
+            ${TONTON_TEST_PIPELINE_SOURCES}
+        )
+
+        target_include_directories(tonton-tests PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
+            ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
+            ${CMAKE_SOURCE_DIR}/modules/tonton/include
+            ${CMAKE_SOURCE_DIR}/modules/rintintin/include
+            ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
+        )
+
+        target_link_libraries(tonton-tests PRIVATE
+            tonton
+            dodeedum
+            fx-gltf
+            rintintin
+            GTest::gtest
+            GTest::gtest_main
+            Threads::Threads
+        )
+
+        if(glm_FOUND)
+            target_link_libraries(tonton-tests PRIVATE glm::glm)
+        endif()
+
+        # Absolute path to the sample models so the tests can run from anywhere.
+        target_compile_definitions(tonton-tests PRIVATE
+            TONTON_SAMPLE_MODELS_DIR="${CMAKE_SOURCE_DIR}/sample models"
+        )
+
+        include(GoogleTest)
+        gtest_discover_tests(tonton-tests)
+    endif()
+endif()
+
+# ============================================================================
 # Installation (optional)
 # ============================================================================
 install(TARGETS rintintin-analyze tonton-analyze chacha-example
