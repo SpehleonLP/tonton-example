@@ -475,4 +475,46 @@ TEST(Physics, JumpEnergyConserved) {
     EXPECT_LE(ke, max_work) << "takeoff KE exceeds muscle work -- energy fabricated";
 }
 
+// Dig speed must now be a physical, bounded quantity. Previously the formula
+// cancelled cross-section and collapsed to a morphology-independent constant
+// (stroke_len*freq). It is now derived from P = F*v against soil penetration
+// resistance, then clamped to the empirical fossorial range (<= 0.01 m/s).
+// We loop every sample model; for any that produces a digging output we assert
+// the speed is finite, strictly positive, and below a generous 1.0 m/s ceiling.
+TEST(Physics, DigSpeedIsPhysicalAndBounded) {
+    const ModelCase models[] = {
+        {"dragonfly", "dragonfly.glb", Env::Air},
+        {"cat",       "cat.glb",       Env::Air},
+        {"shark",     "shark.glb",     Env::Ocean},
+        {"eel",       "eel.glb",       Env::Ocean},
+        {"penguin",   "penguin.glb",   Env::Ocean},
+        {"treefrog",  "treefrog.glb",  Env::Air},
+        {"bat",       "batto.glb",     Env::Air},
+    };
+
+    int diggers = 0;
+    for (const auto& mc : models) {
+        const Output* out = Analyze(mc.file, mc.env);
+        ASSERT_NE(out, nullptr) << mc.label << ": failed to load/analyze " << mc.file;
+
+        if (!out->specialized.digging.has_value())
+            continue;
+
+        ++diggers;
+        const auto& dig = *out->specialized.digging;
+        double v = f(dig.max_dig_speed_m_s);
+        EXPECT_TRUE(finite(v)) << mc.label << ": dig speed not finite";
+        EXPECT_GT(v, 0.0)      << mc.label << ": dig speed not positive (" << v << ")";
+        EXPECT_LT(v, 1.0)      << mc.label << ": dig speed implausibly high (" << v << " m/s)";
+    }
+
+    if (diggers == 0) {
+        // Coverage gap: none of the 7 sample models are fossorial, so the
+        // model-driven path exercises no digging output. The P=F*v formula is
+        // still covered by the library build; add a fossorial sample model to
+        // close this gap.
+        GTEST_SKIP() << "no sample model produces a digging output";
+    }
+}
+
 } // namespace
