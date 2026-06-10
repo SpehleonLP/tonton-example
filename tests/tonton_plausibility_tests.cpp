@@ -150,6 +150,35 @@ const Output* Analyze(const std::string& filename, Env env)
     return result;
 }
 
+// Analyze a model with a fully custom Environment (e.g. a non-Earth gravity).
+// The cached Analyze() above keys on filename+Env enum and cannot express an
+// arbitrary gravity, so this variant runs the same pipeline directly and is
+// deliberately NOT cached -- each call re-runs Output::Factory with the given
+// Environment, guaranteeing the two runs differ when their gravities differ.
+const Output* AnalyzeWithEnv(const std::string& filename, const Environment& env)
+{
+    static std::deque<AnalysisHolder> store;
+
+    std::string path = std::string(TONTON_SAMPLE_MODELS_DIR) + "/" + filename;
+
+    AnalysisHolder holder;
+    holder.input = MakeDefaultInput(Env::Air); // start from the air defaults...
+    holder.input.environment = env;            // ...then override the environment.
+
+    std::vector<const char*> args = { path.c_str() };
+    holder.files = GetArmaturesFromFiles({ args.data(), args.data() + args.size() });
+
+    const Output* result = nullptr;
+    if (!holder.files.empty() && holder.files[0].memo && holder.files[0].memo->size() > 0) {
+        holder.input.builder = Builder::Factory(holder.files[0].memo->at(0));
+        holder.output = Output::Factory(holder.input);
+        result = holder.output.get();
+    }
+
+    store.push_back(std::move(holder));
+    return result;
+}
+
 double f(float q) { return q; }
 template <class Q> double f(const Q& q) { return static_cast<double>(static_cast<float>(q)); }
 
@@ -515,6 +544,41 @@ TEST(Physics, DigSpeedIsPhysicalAndBounded) {
         // close this gap.
         GTEST_SKIP() << "no sample model produces a digging output";
     }
+}
+
+// --- Physics: terrestrial sprint speed obeys Froude similarity (sprint ~ sqrt(g)).
+// The B3/T3 fix multiplies base_sprint and max_sustainable_speed_m_s by
+// g_scale = sqrt(gravity / 9.81) (tonton_terrestrial.cpp:240-242), which flows
+// into Output::terrestrial->max_sprint_speed_m_s. The same model under Moon
+// gravity (1.62 m/s^2) must therefore sprint slower than under Earth gravity by
+// a factor of sqrt(1.62/9.81) ~= 0.406. We use the cat (a confirmed quadruped
+// with a terrestrial output that already passes its species test).
+TEST(Physics, SprintScalesWithGravity) {
+    Environment earth = EarthAir();
+    Environment moon  = EarthAir();
+    moon.gravity_m_s2 = 1.62f; // lunar surface gravity
+
+    const Output* eo = AnalyzeWithEnv("cat.glb", earth);
+    const Output* lo = AnalyzeWithEnv("cat.glb", moon);
+    ASSERT_NE(eo, nullptr);
+    ASSERT_NE(lo, nullptr);
+    ASSERT_TRUE(eo->terrestrial.has_value());
+    ASSERT_TRUE(lo->terrestrial.has_value());
+
+    float se = float(eo->terrestrial->max_sprint_speed_m_s);
+    float sl = float(lo->terrestrial->max_sprint_speed_m_s);
+
+    // Sanity: the two runs really do differ (proves the custom env reached the rule).
+    ASSERT_GT(se, 0.0f);
+    ASSERT_GT(sl, 0.0f);
+    EXPECT_LT(sl, se) << "Moon sprint (" << sl << ") not slower than Earth sprint (" << se << ")";
+
+    // g_scale is the ONLY gravity-dependent factor on base_sprint, so the ratio
+    // is exactly sqrt(1.62/9.81) up to float rounding -- the tight 0.05 band holds.
+    float expected = std::sqrt(1.62f / 9.81f); // ~= 0.406
+    EXPECT_NEAR(sl / se, expected, 0.05f)
+        << "sprint ratio " << (sl / se) << " != sqrt(g_moon/g_earth) " << expected
+        << " (earth=" << se << " moon=" << sl << ")";
 }
 
 } // namespace
