@@ -166,6 +166,7 @@ if(TONTON_BUILD_TESTS)
         add_executable(tonton-tests
             tests/tonton_plausibility_tests.cpp
             tests/tonton_geometry_tests.cpp
+            tests/tonton_wing_dump.cpp
             ${TONTON_TEST_PIPELINE_SOURCES}
         )
 
