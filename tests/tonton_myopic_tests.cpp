@@ -183,3 +183,124 @@ TEST(MyopicEnvelope, AbsentModeReturnsNullopt)
 
 	EXPECT_FALSE(ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f).has_value());
 }
+
+#include "Control/tonton_steer.h"
+
+namespace {
+
+// A minimal envelope for pure control-law tests. No Output involved, which is
+// the point: Steer cannot see one.
+Envelope TestEnvelope()
+{
+	Envelope e;
+	e.max_speed         = velocity_m_s{10.f};
+	e.min_speed         = velocity_m_s{0.f};
+	e.max_accel         = acceleration_m_s2{5.f};
+	e.max_brake         = acceleration_m_s2{5.f};
+	e.max_lateral_accel = acceleration_m_s2{8.f};
+	e.min_turn_radius   = length_m{2.f};
+	e.tau_linear        = time_s{0.25f};
+	return e;
+}
+
+// Integrate a pure heading-tracking maneuver and return the final heading error.
+float SimulateTurn(float dt, float total_time_s, float initial_error_rad)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+	float error = initial_error_rad;
+	float speed = 5.f;
+
+	const int steps = int(total_time_s / dt);
+	for (int i = 0; i < steps; ++i) {
+		SteerCommand cmd;
+		cmd.angle_error_rad   = error;
+		cmd.current_speed_m_s = speed;
+		cmd.desired_speed_m_s = speed;
+		cmd.dt_s              = dt;
+
+		SteerResult r = Steer(env, state, cmd);
+		error -= r.turn_rate_rad_s * dt;
+	}
+	return error;
+}
+
+} // namespace
+
+// THE regression test for the 2025 failure. A dt-dependent control law
+// (a naive lerp, or any PD gain) diverges here.
+TEST(MyopicFramerate, TrajectoryConvergesAcrossTimesteps)
+{
+	const float total = 2.0f;
+	const float start = 1.5f; // rad
+
+	float e16  = SimulateTurn(1.f / 16.f,  total, start);
+	float e30  = SimulateTurn(1.f / 30.f,  total, start);
+	float e60  = SimulateTurn(1.f / 60.f,  total, start);
+	float e120 = SimulateTurn(1.f / 120.f, total, start);
+
+	EXPECT_NEAR(e16,  e60, 0.05f) << "16 Hz diverges from 60 Hz";
+	EXPECT_NEAR(e30,  e60, 0.05f) << "30 Hz diverges from 60 Hz";
+	EXPECT_NEAR(e120, e60, 0.05f) << "120 Hz diverges from 60 Hz";
+}
+
+// A PD controller cannot pass this. Clamped-greedy-plus-slew cannot fail it.
+TEST(MyopicNoOscillation, HeadingErrorIsMonotone)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+	float error = 1.5f;
+	float prev_error = error;
+	const float dt = 1.f / 60.f;
+
+	for (int i = 0; i < 600; ++i) { // 10 seconds
+		SteerCommand cmd;
+		cmd.angle_error_rad   = error;
+		cmd.current_speed_m_s = 5.f;
+		cmd.desired_speed_m_s = 5.f;
+		cmd.dt_s              = dt;
+
+		SteerResult r = Steer(env, state, cmd);
+		error -= r.turn_rate_rad_s * dt;
+
+		ASSERT_GE(error, -0.01f) << "overshot into negative error at step " << i;
+		ASSERT_LE(error, prev_error + 1e-4f) << "error grew at step " << i;
+		prev_error = error;
+	}
+	EXPECT_NEAR(error, 0.f, 0.02f) << "did not converge";
+}
+
+TEST(MyopicSteer, RespectsLateralAccelBudget)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 3.0f; // demand far more than possible
+	cmd.current_speed_m_s = 8.f;
+	cmd.desired_speed_m_s = 8.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	// omega_max = a_lat / v = 8 / 8 = 1.0 rad/s. The slew means the FIRST frame
+	// is well under that; run to steady state before asserting the clamp.
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, cmd);
+
+	EXPECT_LE(std::fabs(r.turn_rate_rad_s), 1.0f + 1e-3f);
+}
+
+TEST(MyopicSteer, StandingCreatureCanPivot)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 1.0f;
+	cmd.current_speed_m_s = 0.f;   // standing still
+	cmd.desired_speed_m_s = 0.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_GT(r.turn_rate_rad_s, 0.f) << "a standing animal must be able to turn";
+	EXPECT_TRUE(std::isfinite(r.turn_rate_rad_s));
+}
