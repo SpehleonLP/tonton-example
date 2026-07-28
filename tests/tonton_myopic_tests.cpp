@@ -138,6 +138,32 @@ const Output* Analyze(const std::string& filename, Env env)
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// A freshly-analysed Output that the CALLER owns exclusively -- not the shared
+// cache above. Two tests need this:
+//   - driving a non-default Input (the mana axis), which the cache's key does
+//     not distinguish;
+//   - mutating the result, which would corrupt every later test if done to the
+//     cached instance.
+// `holder` must outlive the returned pointer: it keeps the mesh chain alive.
+// ---------------------------------------------------------------------------
+counted_ptr<const Output> AnalyzeFresh(const std::string& filename,
+                                       Input input,
+                                       AnalysisHolder& holder)
+{
+    std::string path = std::string(TONTON_SAMPLE_MODELS_DIR) + "/" + filename;
+    holder.input = std::move(input);
+
+    std::vector<const char*> args = { path.c_str() };
+    holder.files = GetArmaturesFromFiles({ args.data(), args.data() + args.size() });
+    if (holder.files.empty() || !holder.files[0].memo || holder.files[0].memo->size() == 0)
+        return {};
+
+    holder.input.builder = Builder::Factory(holder.files[0].memo->at(0));
+    holder.output = Output::Factory(holder.input);
+    return holder.output;
+}
+
 } // namespace
 
 TEST(MyopicEnvelope, TerrestrialGaitsAreOrdered)
@@ -3259,6 +3285,18 @@ TEST(MyopicEnvelope, AquaticInvariants)
 	EXPECT_TRUE(std::isfinite(float(env->tau_linear)));
 	EXPECT_GT(float(env->tau_linear), 0.f);
 	EXPECT_FALSE(env->aerial.has_value()) << "swimmers have no load factor";
+
+	// AQUATIC is the ONLY one of Task 7's four arms with a real, measured
+	// turning radius -- serpentine, climbing and brachiation all report the
+	// no-constraint sentinel 0. Nothing pinned that it is actually used: quietly
+	// replacing it with the sentinel here (i.e. discarding the one measurement)
+	// was invisible to the suite. It has to be a positive number, and it has to
+	// be the analysis's own number.
+	EXPECT_GT(float(env->min_turn_radius), 0.f)
+		<< "the aquatic arm has a stated turning radius; it must not fall back "
+		   "to the no-constraint sentinel";
+	EXPECT_FLOAT_EQ(float(env->min_turn_radius),
+	                float(out->aquatic->min_turning_radius_m));
 }
 
 // The plan asserts `requires_constant_motion` on shark.glb in Env::Ocean. It is
@@ -3320,14 +3358,47 @@ TEST(MyopicEnvelope, SerpentineInvariants)
 	EXPECT_GT(float(env->min_speed), 0.f);
 	EXPECT_LT(float(env->min_speed), float(env->max_speed));
 	EXPECT_FALSE(env->aerial.has_value());
+
+	// --- PLACEHOLDER PIN (J3) ---------------------------------------------
+	// The serpentine max_accel is `undulation_speed / 1 second`. That divisor is
+	// a PLACEHOLDER for a quantity Analysis_Serpentine does not export (the
+	// undulation frequency, which tonton_serpentine.cpp:186 computes and drops
+	// on the floor), NOT a derived time. Shipped deliberately and adjudicated --
+	// but nothing observed it, so it could be changed to any other divisor with
+	// the suite staying green, which would silently rescale every `stability`
+	// and `turn_headroom` a snake reports.
+	//
+	// These two assertions make the placeholder VISIBLE. They are pinning a
+	// known-provisional value, and they are EXPECTED to fail the day the
+	// frequency is exported and max_accel becomes the honest `speed * f`. When
+	// that happens, update them deliberately -- do not delete them.
+	const float undulation = float(out->serpentine->lateral_undulation_speed_m_s);
+	EXPECT_FLOAT_EQ(float(env->max_accel), undulation)
+		<< "placeholder: max_accel is undulation_speed / 1 s";
+	EXPECT_FLOAT_EQ(float(env->max_brake), undulation);
+	EXPECT_FLOAT_EQ(float(env->tau_linear), 1.f)
+		<< "placeholder: tau is 1 s by construction, not by derivation";
 }
 
 // --- C1: the aquatic acceleration is a MECHANICAL SURPLUS -----------------
 //
 // The plan fed `metabolic.max_rate_W` -- a whole-organism metabolic rate -- into
-// a = P/(m v). That is the exact defect Task 4 removed from the aerial arm. The
-// aquatic arm must mirror the aerial shape: the mechanical muscle ceiling minus
-// the mechanical power steady cruising already spends.
+// a = P/(m v). That is the exact defect Task 4 removed from the aerial arm.
+//
+// J1: the first fix mirrored the AERIAL arm syntactically -- muscle power minus
+// the cruise cost -- but that is not the same OPERATION. Aerial subtracts a real
+// aerodynamic DEMAND derived independently of muscle power (184% of it for the
+// bat, which correctly zeroes the surplus). Both aquatic power figures are
+// BUDGET ALLOCATIONS of the same available_muscle_power_W, so
+// `muscle - 0.08*muscle` was a fixed 0.92*muscle on every sample forever, and it
+// assumed 2.3x the budget the burst SPEED bounding the same envelope came from.
+// The arm now spends out of the burst budget: 0.4*muscle - 0.08*muscle.
+//
+// J4: the PROVENANCE of both exported fields is pinned against
+// available_muscle_power_W directly, not recomputed from the fields themselves.
+// Without that, rewiring either field to a different multiple of the muscle
+// power left the suite green, because the expectation was derived from the very
+// field under test.
 TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
 {
 	for (const char* file : {"penguin.glb", "shark.glb", "eel.glb"}) {
@@ -3339,29 +3410,57 @@ TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
 		auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
 		ASSERT_TRUE(env.has_value()) << file;
 
-		// The cruise figure must be the MECHANICAL one the rules layer already
-		// computes (tonton_aquatic.cpp: available_muscle_power_W * 0.08), not a
-		// metabolic rate.
+		// --- J4: PROVENANCE, asserted against available_muscle_power_W --------
+		// Not "the field is smaller than the muscle power" (which 0.08, 0.4 and
+		// a rewired-by-mistake 0.9 all satisfy), but the exact allocation
+		// tonton_aquatic.cpp documents. Rewiring either field to the other's
+		// multiple must be a RED here, not a silently different envelope.
+		const float muscle = float(out->metabolic.available_muscle_power_W);
+		ASSERT_GT(muscle, 0.f) << file;
 		ASSERT_GT(float(a.swim_power_mechanical_W), 0.f) << file;
-		EXPECT_LT(float(a.swim_power_mechanical_W),
-		          float(out->metabolic.available_muscle_power_W)) << file;
+		ASSERT_GT(float(a.swim_power_burst_mechanical_W), 0.f) << file;
 
+		EXPECT_NEAR(float(a.swim_power_mechanical_W), 0.08f * muscle,
+		            1e-4f * muscle)
+			<< file << ": swim_power_mechanical_W is the 8% CRUISE allocation "
+			           "of available_muscle_power_W (tonton_aquatic.cpp)";
+		EXPECT_NEAR(float(a.swim_power_burst_mechanical_W), 0.4f * muscle,
+		            1e-4f * muscle)
+			<< file << ": swim_power_burst_mechanical_W is the 40% BURST "
+			           "allocation of available_muscle_power_W, and is the same "
+			           "budget burst_speed_m_s is derived from";
+
+		// --- J1: the surplus is spent out of the BURST budget -----------------
+		// max_speed is burst_speed_m_s, which tonton_aquatic.cpp derives from
+		// 0.4*muscle. An acceleration derived from a LARGER budget than the top
+		// speed bounding it would make the envelope internally inconsistent.
 		const float surplus = std::max(0.f,
-			float(out->metabolic.available_muscle_power_W)
+			float(a.swim_power_burst_mechanical_W)
 			- float(a.swim_power_mechanical_W));
 		const float expect = surplus / (float(out->physical.body_mass_kg)
 		                              * float(a.cruise_speed_m_s));
 
-		std::cerr << "[c1 " << file << "] muscle="
-		          << float(out->metabolic.available_muscle_power_W)
+		std::cerr << "[c1 " << file << "] muscle=" << muscle
 		          << "W cruise_mech=" << float(a.swim_power_mechanical_W)
+		          << "W burst_mech=" << float(a.swim_power_burst_mechanical_W)
 		          << "W metabolic_max=" << float(out->metabolic.max_rate_W)
 		          << "W mass=" << float(out->physical.body_mass_kg)
 		          << "kg cruise=" << float(a.cruise_speed_m_s)
 		          << "m/s -> max_accel=" << float(env->max_accel)
+		          << " (" << float(env->max_accel) / 9.81f << " g)"
 		          << " tau_linear=" << float(env->tau_linear) << "\n";
 
 		EXPECT_NEAR(float(env->max_accel), expect, expect * 1e-4f) << file;
+
+		// ...and specifically NOT the 0.92*muscle the pre-J1 arm computed. That
+		// value is 2.3x this one on every sample, so the assertion above is not
+		// two formulas agreeing by accident.
+		const float pre_j1 = (muscle - float(a.swim_power_mechanical_W))
+		                   / (float(out->physical.body_mass_kg)
+		                    * float(a.cruise_speed_m_s));
+		EXPECT_GT(pre_j1, float(env->max_accel) * 2.f)
+			<< file << ": subtracting an 8% allocation from the quantity it is "
+			           "an allocation OF is not a surplus";
 
 		// ...and specifically NOT the plan's metabolic formula. These differ by
 		// more than an order of magnitude on every sample, so the assertion
@@ -3486,11 +3585,20 @@ TEST(MyopicFrame, ASwimmersEnvelopeIsEvaluatedAgainstTheWaterNotTheGround)
 	EXPECT_NEAR(drift.speed_headroom, still.speed_headroom, 1e-4f);
 	EXPECT_NEAR(drift.turn_headroom,  still.turn_headroom,  1e-4f);
 
-	// The other direction, so the equalities above are not two cases collapsing
-	// onto the same wrong answer: the SAME ground speed swimming into a current
-	// strong enough to leave the fish moving backwards through the water is a
-	// materially different condition. Under a ground-frame reading it would be
-	// identical to `still`.
+	// The pair above IS the frame discriminator: `still` and `drift` have
+	// different GROUND speeds (cruise vs 3x cruise) and the same WATER speed, so
+	// flipping AQUATIC to the GROUND frame reddens it. Everything below is a
+	// different kind of check.
+	//
+	// J8 -- HONESTY NOTE about the case below: this third case is NOT a frame
+	// discriminator, and it would not survive being treated as one. It changes
+	// `desired_speed_m_s` (ground - current) from +2.535 to -5.07 as well as
+	// changing the frame, so a ground-frame reading would ALSO produce a
+	// different answer here and the assertion would still pass. What it is, and
+	// all it is: a live-fire check that a creature swept BACKWARDS through the
+	// water -- negative water speed, negative desired speed -- still settles to a
+	// finite, materially different control output instead of degenerating. Keep
+	// it for that; do not cite it as evidence about the frame.
 	MyopicOutput upstream = settle(cruise, 3.f * cruise);
 	std::cerr << "[frame aquatic] into a 3x-cruise current: turn="
 	          << upstream.angular_velocity_rad_s.y
@@ -3581,6 +3689,20 @@ TEST(MyopicEnvelope, ClimbingUsesTheStatedClimbSpeed)
 	auto walk = ExtractEnvelope(*out, LocomotionMode::TERRESTRIAL, 0, 9.81f);
 	ASSERT_TRUE(walk.has_value());
 	EXPECT_LT(float(env->max_speed), float(walk->max_speed));
+
+	// --- PLACEHOLDER PIN (J3) ---------------------------------------------
+	// As in SerpentineInvariants: the climbing max_accel is
+	// `max_climb_speed / 1 second`, a placeholder for a stride rate
+	// Analysis_Climbing does not expose, not a derivation. Unobserved, the
+	// divisor could be changed to anything and the suite stayed green, silently
+	// rescaling every stability and turn_headroom a climbing cat reports.
+	// EXPECTED to fail, and to be updated deliberately, the day climbing gains
+	// a real acceleration or stride frequency.
+	const float climb = float(out->climbing->max_climb_speed_m_s);
+	EXPECT_FLOAT_EQ(float(env->max_accel), climb)
+		<< "placeholder: max_accel is max_climb_speed / 1 s";
+	EXPECT_FLOAT_EQ(float(env->tau_linear), 1.f)
+		<< "placeholder: tau is 1 s by construction, not by derivation";
 }
 
 // --- C4: the non-aerial turn strategy is not a claim about the substrate ---
@@ -3617,5 +3739,154 @@ TEST(MyopicEntryPoint, NonAerialModesReportALateralTurnNotAGroundOne)
 
 		EXPECT_EQ(o.strategy, TurnStrategy::LATERAL) << r.file << " mode=" << int(r.mode);
 		EXPECT_FLOAT_EQ(o.bank_angle_rad, 0.f) << r.file << " mode=" << int(r.mode);
+	}
+}
+
+// ============================================================================
+// Task 7 review round (J5-J7): gaps the reviewer's mutants walked through
+// ============================================================================
+
+// --- J6: an Envelope whose floor is at or above its ceiling is not usable ---
+//
+// `Envelope` carried no min_speed < max_speed invariant, and the aquatic arm can
+// invert it through a SUPPORTED input. tonton_aquatic.cpp scales
+// cruise_speed_m_s and burst_speed_m_s by exp2(mana.air) at the return statement
+// but does NOT scale min_swim_speed_m_s, which was computed as cruise*0.5 before
+// the scaling. So a negative mana.air shrinks the ceiling out from under a fixed
+// floor and the envelope turns inside out -- at which point every headroom and
+// stability term downstream is meaningless or sign-flipped.
+//
+// The gate lives in ExtractEnvelope and reports ABSENCE, the same way
+// UsableAccel already handles a nonsensical envelope. It is applied to every arm
+// rather than only this one: it is a statement about what an Envelope is, not
+// about the aquatic derivation. (Verified: at the default inputs no arm's band
+// is inverted on any sample, so it changes no current behaviour.)
+//
+// The unscaled min_swim_speed_m_s itself is an UPSTREAM inconsistency and is
+// reported as a follow-up, not patched here.
+TEST(MyopicEnvelope, AnInvertedSpeedBandIsReportedAsAbsence)
+{
+	// The shark in air is the sample that has a min_swim_speed floor at all
+	// (requires_constant_motion; see SharkRequiresConstantMotion for why
+	// seawater cannot reach that branch).
+	AnalysisHolder base_holder;
+	Input base_in = MakeDefaultInput(Env::Air);
+	auto base = AnalyzeFresh("shark.glb", base_in, base_holder);
+	ASSERT_TRUE(base);
+	ASSERT_TRUE(base->aquatic.has_value());
+	ASSERT_TRUE(base->aquatic->requires_constant_motion);
+	ASSERT_LT(float(base->aquatic->min_swim_speed_m_s),
+	          float(base->aquatic->burst_speed_m_s))
+		<< "control: at mana.air = 0 the band is the right way round";
+	ASSERT_TRUE(ExtractEnvelope(*base, LocomotionMode::AQUATIC, 0, 9.81f).has_value())
+		<< "control: the same sample DOES yield an envelope at default mana, so a "
+		   "nullopt below is about the band and not about the sample";
+
+	// Now drive the supported mana axis down. exp2(-8) = 1/256 on the speeds,
+	// nothing on the floor.
+	AnalysisHolder bent_holder;
+	Input bent_in = MakeDefaultInput(Env::Air);
+	bent_in.mana.air = -8.f;
+	auto bent = AnalyzeFresh("shark.glb", bent_in, bent_holder);
+	ASSERT_TRUE(bent);
+	ASSERT_TRUE(bent->aquatic.has_value());
+
+	std::cerr << "[j6 shark air] mana.air=0: min=" 
+	          << float(base->aquatic->min_swim_speed_m_s)
+	          << " burst=" << float(base->aquatic->burst_speed_m_s)
+	          << " | mana.air=-8: min="
+	          << float(bent->aquatic->min_swim_speed_m_s)
+	          << " burst=" << float(bent->aquatic->burst_speed_m_s) << "\n";
+
+	// The upstream inconsistency, asserted so the finding is visible in the
+	// suite: the floor did not move, the ceiling did, and they crossed.
+	EXPECT_FLOAT_EQ(float(bent->aquatic->min_swim_speed_m_s),
+	                float(base->aquatic->min_swim_speed_m_s))
+		<< "min_swim_speed_m_s is not scaled by exp2(mana.air) -- if this ever "
+		   "stops being true, the upstream inconsistency is fixed and this test "
+		   "needs a different way to invert the band";
+	ASSERT_GE(float(bent->aquatic->min_swim_speed_m_s),
+	          float(bent->aquatic->burst_speed_m_s))
+		<< "the band must actually be inverted for this test to test anything";
+
+	// ...and the control layer refuses it rather than handing a caller an
+	// envelope it cannot reason about.
+	EXPECT_FALSE(ExtractEnvelope(*bent, LocomotionMode::AQUATIC, 0, 9.81f).has_value())
+		<< "an inverted speed band is not a usable envelope";
+}
+
+// --- J7: the brachiation arm, and what could NOT be covered ----------------
+//
+// No sample model has arms >= 0.8 body lengths (tonton_climbing.cpp:456), so no
+// Analysis_Brachiation is ever produced and the arm is verified by inspection
+// only -- the reviewer's "BRACHIATION arm returns nullopt" mutant is invisible
+// to the entire suite. The self-repealing EXPECT_EQ(brachiation, 0) tripwire in
+// RemainingModesAppearExactlyWhenTheirAnalysisDoes stays; a gibbon-shaped sample
+// is the real fix.
+//
+// WHAT WAS TRIED AND WHY IT DOES NOT WORK. The plan was to analyse a real model
+// into an Output this test owns exclusively and install a synthetic brachiation
+// section on it, so the SHIPPED ExtractEnvelope arm would run. Output's private
+// constructor is not the blocker (Output::Factory is public). The blocker is
+// TonTon::optional (include/tonton_optional.hpp): it is not std::optional but an
+// ARENA-OFFSET type. It stores a uint32_t byte offset from `this` into a memory
+// arena that Output::Factory allocates; copy and move assignment are both
+// `= delete`, and the sole mutator, `load()`, throws unless the optional lives
+// inside the arena span it is handed and would need the caller to place the
+// object at a controlled address above `this`. There is no way to populate a
+// section from outside Output::Factory without changing production code, and
+// nothing was weakened to get there.
+//
+// WHAT IS COVERED INSTEAD. The shape the arm emits -- a = v*f (the arm alone
+// among the three non-fluid ones needs no placeholder, because swing_frequency_Hz
+// is a real exported quantity), the no-constraint sentinel radius, and no aerial
+// authority -- is hand-built here and driven through the real Steer, exactly as
+// the Envelope tests above do. This proves the emitted shape is safe downstream;
+// it does NOT prove ExtractEnvelope emits it. That gap is reported, not papered
+// over.
+TEST(MyopicSteer, ABrachiatorsEnvelopeShapeIsSafeDownstream)
+{
+	// The arm's arithmetic, spelled out: a brachiator changes speed once per
+	// swing. 3 m/s at 0.8 Hz.
+	const float swing_speed = 3.0f;
+	const float swing_freq  = 0.8f;
+
+	Envelope e;
+	e.max_speed         = velocity_m_s{swing_speed};
+	e.min_speed         = velocity_m_s{0.f};          // can hang motionless
+	e.max_accel         = acceleration_m_s2{swing_speed * swing_freq};
+	e.max_brake         = e.max_accel;
+	e.min_turn_radius   = length_m{0.f};              // no-constraint SENTINEL
+	e.max_lateral_accel = e.max_accel;                // LateralBudget fall-through
+	e.tau_linear        = e.max_speed / e.max_accel;
+	// No AerialAuthority: a brachiator does not bank.
+	ASSERT_FALSE(e.aerial.has_value());
+
+	EXPECT_FLOAT_EQ(float(e.max_accel), 2.4f);
+	EXPECT_FLOAT_EQ(float(e.tau_linear), 1.25f);
+
+	// The sentinel must not produce an infinite lateral budget downstream, and
+	// the whole envelope must steer finitely at rest, mid-band and at the
+	// ceiling -- including the v = 0 case, where a v^2/r or v/r bound would be
+	// degenerate.
+	for (float v : {0.f, 0.5f * swing_speed, swing_speed}) {
+		SteerState st{};
+		SteerCommand cmd;
+		cmd.angle_error_rad   = 1.2f;
+		cmd.current_speed_m_s = v;
+		cmd.desired_speed_m_s = swing_speed;
+		cmd.dt_s              = 1.f / 60.f;
+		SteerResult r;
+		for (int i = 0; i < 300; ++i) r = Steer(e, st, cmd);
+
+		EXPECT_TRUE(std::isfinite(r.turn_rate_rad_s)) << "v=" << v;
+		EXPECT_TRUE(std::isfinite(r.accel_m_s2))      << "v=" << v;
+		EXPECT_TRUE(std::isfinite(r.stability))       << "v=" << v;
+		EXPECT_TRUE(std::isfinite(r.turn_headroom))   << "v=" << v;
+		EXPECT_TRUE(std::isfinite(r.speed_headroom))  << "v=" << v;
+		EXPECT_LE(std::fabs(r.accel_m_s2), float(e.max_accel) + 1e-4f) << "v=" << v;
+		// A brachiator does not bank: no aerial authority means a LATERAL turn.
+		EXPECT_EQ(r.strategy, TurnStrategy::LATERAL) << "v=" << v;
+		EXPECT_FLOAT_EQ(r.bank_angle_rad, 0.f)       << "v=" << v;
 	}
 }
