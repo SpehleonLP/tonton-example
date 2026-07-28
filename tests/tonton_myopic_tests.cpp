@@ -583,6 +583,14 @@ TEST(MyopicEnvelope, AerialInvariants)
 	EXPECT_GE(env->aerial->n_max, 1.f) << "load factor cannot be below 1";
 	EXPECT_TRUE(std::isfinite(env->aerial->n_max));
 	EXPECT_GT(float(env->aerial->max_roll_rate), 0.f);
+
+	// n_max == 1 exactly means g*sqrt(n^2-1) == 0: an animal that flies but
+	// cannot turn. That is never a physical answer, only a symptom of a bad
+	// load-factor input being caught by the n>=1 floor. Assert it here so the
+	// clamp can never silently hide a non-physical intermediate again.
+	EXPECT_GT(env->aerial->n_max, 1.f) << "a flyer whose load factor floors at 1 cannot bank";
+	EXPECT_GT(float(env->max_lateral_accel), 0.f) << "a flyer must be able to turn";
+	EXPECT_TRUE(std::isfinite(float(env->max_lateral_accel)));
 }
 
 TEST(MyopicEnvelope, AerialAccelerationIsPlausible)
@@ -596,4 +604,9 @@ TEST(MyopicEnvelope, AerialAccelerationIsPlausible)
 	// Far outside this band means the P = F*v derivation has a units error.
 	EXPECT_GT(float(env->max_accel), 0.1f);
 	EXPECT_LT(float(env->max_accel), 100.f);
+
+	// Banked turns of biological flyers sit around 1.5-4 g. Anything past ~10 g
+	// would mean the load-factor derivation has lost its footing.
+	ASSERT_TRUE(env->aerial.has_value());
+	EXPECT_LT(env->aerial->n_max, 10.f) << "n_max = " << env->aerial->n_max;
 }
