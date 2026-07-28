@@ -1119,7 +1119,7 @@ TEST(MyopicBank, GroundEnvelopesStayGround)
 	SteerResult r{};
 	for (int i = 0; i < 60; ++i) r = Steer(env, state, TurnCommand(1.57f, 5.f));
 
-	EXPECT_EQ(r.strategy, TurnStrategy::GROUND);
+	EXPECT_EQ(r.strategy, TurnStrategy::LATERAL);
 	EXPECT_FLOAT_EQ(r.bank_angle_rad, 0.f);
 }
 
@@ -2072,7 +2072,7 @@ TEST(MyopicEntryPoint, ReportsStrategyAndBankAngle)
 		MyopicState st{};
 		MyopicInput in = GroundChase(0.6f, 3.f, 1.f / 60.f);
 		MyopicOutput o = ComputeMyopicControl(*ground, in, st);
-		EXPECT_EQ(o.strategy, TurnStrategy::GROUND);
+		EXPECT_EQ(o.strategy, TurnStrategy::LATERAL);
 		EXPECT_EQ(o.bank_angle_rad, 0.f);
 	}
 
@@ -2094,7 +2094,7 @@ TEST(MyopicEntryPoint, ReportsStrategyAndBankAngle)
 	in.target_mode = LocomotionMode::AERIAL;
 
 	MyopicOutput o = ComputeMyopicControl(*flyer, in, st);
-	EXPECT_NE(o.strategy, TurnStrategy::GROUND) << "an aerial envelope yaws or banks";
+	EXPECT_NE(o.strategy, TurnStrategy::LATERAL) << "an aerial envelope yaws or banks";
 	EXPECT_EQ(o.bank_angle_rad, st.bank_angle_rad) << "output must mirror the state";
 	EXPECT_GT(o.bank_angle_rad, 0.f)   << "roll-out is a process, not an instant";
 	EXPECT_LT(o.bank_angle_rad, seed)  << "and it must actually make progress";
@@ -2645,8 +2645,17 @@ TEST(MyopicEntryPoint, ModeUnavailableReportsNoAuthorityNotFullComfort)
 	const Output* out = Analyze("cat.glb", Env::Air);
 	ASSERT_NE(out, nullptr);
 
+	// Modes cat.glb genuinely has no analysis section for. CLIMBING was in this
+	// list until Task 7: the cat DOES have an Analysis_Climbing (cats climb), it
+	// simply had no envelope arm yet, so the mode read as unavailable for the
+	// wrong reason. BRACHIATION replaces it -- no sample model has arms long
+	// enough to produce an Analysis_Brachiation.
+	ASSERT_FALSE(out->aerial.has_value());
+	ASSERT_FALSE(out->aquatic.has_value());
+	ASSERT_FALSE(out->serpentine.has_value());
+	ASSERT_FALSE(out->brachiation.has_value());
 	for (LocomotionMode m : {LocomotionMode::AERIAL, LocomotionMode::AQUATIC,
-	                         LocomotionMode::SERPENTINE, LocomotionMode::CLIMBING}) {
+	                         LocomotionMode::SERPENTINE, LocomotionMode::BRACHIATION}) {
 		MyopicState st{};
 		MyopicInput in;
 		in.mode        = m;
@@ -3219,4 +3228,394 @@ TEST(MyopicLaunchDispatch, WaterTaxiDoesNotBuyALegThrust)
 	// the water and not about the arm being gutted.
 	f.substrate = Substrate::GROUND;
 	EXPECT_TRUE(PlanLaunch(f).feasible);
+}
+
+// ============================================================================
+// Task 7: aquatic, serpentine, climbing and brachiation envelopes
+// ============================================================================
+
+// --- The plan's Step 1 tests ----------------------------------------------
+
+TEST(MyopicEnvelope, AquaticInvariants)
+{
+	const Output* out = Analyze("penguin.glb", Env::Ocean);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aquatic.has_value());
+
+	auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	std::cerr << "[aquatic penguin] max_speed=" << float(env->max_speed)
+	          << " min_speed=" << float(env->min_speed)
+	          << " max_accel=" << float(env->max_accel)
+	          << " max_brake=" << float(env->max_brake)
+	          << " a_lat=" << float(env->max_lateral_accel)
+	          << " r=" << float(env->min_turn_radius)
+	          << " tau=" << float(env->tau_linear) << "\n";
+
+	EXPECT_GT(float(env->max_speed), 0.f);
+	EXPECT_LT(float(env->min_speed), float(env->max_speed));
+	EXPECT_GT(float(env->max_accel), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->tau_linear)));
+	EXPECT_GT(float(env->tau_linear), 0.f);
+	EXPECT_FALSE(env->aerial.has_value()) << "swimmers have no load factor";
+}
+
+// The plan asserts `requires_constant_motion` on shark.glb in Env::Ocean. It is
+// FALSE there, and no input can make it true: tonton_aquatic.cpp:224 requires
+// body_density > 1.05 * fluid_density, body_density() (tonton_input.h:103) tops
+// out at 1050 kg/m^3, and 1.05 * 1025 = 1076.25 kg/m^3. So in seawater the flag
+// is unreachable -- see the follow-up findings. Env::Air is the only medium in
+// which this sample exercises the branch, and what is under test here is the
+// ENVELOPE ARM (does a min-swim-speed floor reach Envelope::min_speed?), not
+// the fluid. Both media are asserted so the finding stays visible.
+TEST(MyopicEnvelope, SharkRequiresConstantMotion)
+{
+	const Output* air = Analyze("shark.glb", Env::Air);
+	ASSERT_NE(air, nullptr);
+	ASSERT_TRUE(air->aquatic.has_value());
+	ASSERT_TRUE(air->aquatic->requires_constant_motion);
+	ASSERT_GT(float(air->aquatic->min_swim_speed_m_s), 0.f);
+
+	auto env = ExtractEnvelope(*air, LocomotionMode::AQUATIC, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	// A shark's minimum swim speed is a real floor, expressed as min_speed so
+	// the existing stability term reports it. No transition logic needed.
+	EXPECT_GT(float(env->min_speed), 0.f);
+	EXPECT_FLOAT_EQ(float(env->min_speed), float(air->aquatic->min_swim_speed_m_s));
+	EXPECT_LT(float(env->min_speed), float(env->max_speed));
+
+	// Documents the finding above rather than hiding it: in seawater the same
+	// creature reports no floor at all.
+	const Output* sea = Analyze("shark.glb", Env::Ocean);
+	ASSERT_NE(sea, nullptr);
+	ASSERT_TRUE(sea->aquatic.has_value());
+	EXPECT_FALSE(sea->aquatic->requires_constant_motion)
+		<< "if this ever becomes true, the density-cap finding is fixed and this "
+		   "test should move wholesale to Env::Ocean";
+	auto sea_env = ExtractEnvelope(*sea, LocomotionMode::AQUATIC, 0, 9.81f);
+	ASSERT_TRUE(sea_env.has_value());
+	EXPECT_FLOAT_EQ(float(sea_env->min_speed), 0.f);
+}
+
+TEST(MyopicEnvelope, SerpentineInvariants)
+{
+	const Output* out = Analyze("eel.glb", Env::Ocean);
+	ASSERT_NE(out, nullptr);
+	if (!out->serpentine.has_value()) GTEST_SKIP() << "eel has no serpentine section";
+
+	auto env = ExtractEnvelope(*out, LocomotionMode::SERPENTINE, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+	std::cerr << "[serpentine eel] max_speed=" << float(env->max_speed)
+	          << " min_speed=" << float(env->min_speed)
+	          << " max_accel=" << float(env->max_accel)
+	          << " tau=" << float(env->tau_linear) << "\n";
+	EXPECT_GT(float(env->max_speed), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->tau_linear)));
+
+	// The envelope is the undulation speed, not some rescaled version of it.
+	EXPECT_FLOAT_EQ(float(env->max_speed),
+	                float(out->serpentine->lateral_undulation_speed_m_s));
+	EXPECT_GT(float(env->min_speed), 0.f);
+	EXPECT_LT(float(env->min_speed), float(env->max_speed));
+	EXPECT_FALSE(env->aerial.has_value());
+}
+
+// --- C1: the aquatic acceleration is a MECHANICAL SURPLUS -----------------
+//
+// The plan fed `metabolic.max_rate_W` -- a whole-organism metabolic rate -- into
+// a = P/(m v). That is the exact defect Task 4 removed from the aerial arm. The
+// aquatic arm must mirror the aerial shape: the mechanical muscle ceiling minus
+// the mechanical power steady cruising already spends.
+TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
+{
+	for (const char* file : {"penguin.glb", "shark.glb", "eel.glb"}) {
+		const Output* out = Analyze(file, Env::Ocean);
+		ASSERT_NE(out, nullptr) << file;
+		ASSERT_TRUE(out->aquatic.has_value()) << file;
+		const auto& a = *out->aquatic;
+
+		auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
+		ASSERT_TRUE(env.has_value()) << file;
+
+		// The cruise figure must be the MECHANICAL one the rules layer already
+		// computes (tonton_aquatic.cpp: available_muscle_power_W * 0.08), not a
+		// metabolic rate.
+		ASSERT_GT(float(a.swim_power_mechanical_W), 0.f) << file;
+		EXPECT_LT(float(a.swim_power_mechanical_W),
+		          float(out->metabolic.available_muscle_power_W)) << file;
+
+		const float surplus = std::max(0.f,
+			float(out->metabolic.available_muscle_power_W)
+			- float(a.swim_power_mechanical_W));
+		const float expect = surplus / (float(out->physical.body_mass_kg)
+		                              * float(a.cruise_speed_m_s));
+
+		std::cerr << "[c1 " << file << "] muscle="
+		          << float(out->metabolic.available_muscle_power_W)
+		          << "W cruise_mech=" << float(a.swim_power_mechanical_W)
+		          << "W metabolic_max=" << float(out->metabolic.max_rate_W)
+		          << "W mass=" << float(out->physical.body_mass_kg)
+		          << "kg cruise=" << float(a.cruise_speed_m_s)
+		          << "m/s -> max_accel=" << float(env->max_accel)
+		          << " tau_linear=" << float(env->tau_linear) << "\n";
+
+		EXPECT_NEAR(float(env->max_accel), expect, expect * 1e-4f) << file;
+
+		// ...and specifically NOT the plan's metabolic formula. These differ by
+		// more than an order of magnitude on every sample, so the assertion
+		// above is not two formulas agreeing by accident.
+		const float plan_value = float(out->metabolic.max_rate_W)
+			/ (float(out->physical.body_mass_kg) * float(a.cruise_speed_m_s));
+		EXPECT_GT(std::fabs(float(env->max_accel) - plan_value), 1.f)
+			<< file << ": a metabolic rate is not a mechanical power";
+
+		// tau is the cruise speed divided by exactly that acceleration.
+		EXPECT_NEAR(float(env->tau_linear),
+		            float(a.cruise_speed_m_s) / float(env->max_accel),
+		            1e-5f) << file;
+	}
+}
+
+// --- C2: braking is never weaker than accelerating under water ------------
+TEST(MyopicEnvelope, AquaticBrakeIsAFloorNotACeiling)
+{
+	const Output* out = Analyze("shark.glb", Env::Ocean);
+	ASSERT_NE(out, nullptr);
+	auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+	EXPECT_GE(float(env->max_brake), float(env->max_accel))
+		<< "drag adds to whatever the muscles do; braking cannot be the weaker "
+		   "channel";
+	EXPECT_GT(float(env->max_brake), 0.f);
+}
+
+// --- C3: min_turn_radius == 0 is a sentinel, not a measurement -------------
+//
+// Serpentine, climbing and brachiation all report 0. It has to mean "this mode
+// states no radius constraint", and every consumer has to survive it: a
+// fabricated v^2/0 bound would be an infinite lateral budget, and a naive
+// v/radius turn-rate bound would divide by zero.
+TEST(MyopicEnvelope, ZeroTurnRadiusIsANoConstraintSentinel)
+{
+	struct Case { const char* file; Env env; LocomotionMode mode; };
+	const Case cases[] = {
+		{"eel.glb", Env::Ocean, LocomotionMode::SERPENTINE},
+		{"cat.glb", Env::Air,   LocomotionMode::CLIMBING},
+	};
+
+	int checked = 0;
+	for (const Case& c : cases) {
+		const Output* out = Analyze(c.file, c.env);
+		ASSERT_NE(out, nullptr) << c.file;
+		auto env = ExtractEnvelope(*out, c.mode, 0, 9.81f);
+		ASSERT_TRUE(env.has_value()) << c.file;
+		++checked;
+
+		EXPECT_FLOAT_EQ(float(env->min_turn_radius), 0.f) << c.file;
+		// The sentinel must fall through to the acceleration budget, finite and
+		// positive -- not to infinity and not to zero.
+		EXPECT_TRUE(std::isfinite(float(env->max_lateral_accel))) << c.file;
+		EXPECT_GT(float(env->max_lateral_accel), 0.f) << c.file;
+		EXPECT_FLOAT_EQ(float(env->max_lateral_accel), float(env->max_accel)) << c.file;
+
+		// And it must survive a whole steer, at rest and at speed.
+		for (float v : {0.f, 0.5f * float(env->max_speed), float(env->max_speed)}) {
+			MyopicState st{};
+			MyopicInput in;
+			in.mode            = c.mode;
+			in.target_mode     = c.mode;
+			in.target_position = TargetAtBearing(1.2f);
+			in.velocity_m_s    = glm::vec3(0.f, 0.f, v);
+			in.dt_s            = 1.f / 60.f;
+			MyopicOutput o = ComputeMyopicControl(*out, in, st);
+			EXPECT_TRUE(std::isfinite(o.angular_velocity_rad_s.y)) << c.file << " v=" << v;
+			EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.x)) << c.file << " v=" << v;
+			EXPECT_TRUE(std::isfinite(o.stability)) << c.file << " v=" << v;
+			EXPECT_TRUE(std::isfinite(o.turn_headroom)) << c.file << " v=" << v;
+		}
+	}
+	EXPECT_EQ(checked, 2);
+}
+
+// --- C5: an AQUATIC envelope is evaluated against the WATER ----------------
+//
+// The mirror of MyopicFrame.AFlyersEnvelopeIsEvaluatedAgainstTheAirNotTheGround
+// for a fin. A fish holding station in a river is the case with no coverage.
+TEST(MyopicFrame, ASwimmersEnvelopeIsEvaluatedAgainstTheWaterNotTheGround)
+{
+	const Output* out = Analyze("shark.glb", Env::Ocean);
+	ASSERT_NE(out, nullptr);
+	auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+	const float cruise = float(out->aquatic->cruise_speed_m_s);
+	ASSERT_GT(cruise, 0.f);
+
+	auto settle = [&](float ground, float current) {
+		MyopicState st{};
+		MyopicOutput o;
+		for (int i = 0; i < 600; ++i) {
+			MyopicInput in;
+			in.mode                = LocomotionMode::AQUATIC;
+			in.target_mode         = LocomotionMode::AQUATIC;
+			in.orientation         = glm::quat(1.f, 0.f, 0.f, 0.f); // forward +Z
+			in.target_position     = TargetAtBearing(0.8f);
+			in.velocity_m_s        = glm::vec3(0.f, 0.f, ground);
+			in.medium_velocity_m_s = glm::vec3(0.f, 0.f, current);
+			in.desired_speed_m_s   = ground - current;
+			in.dt_s                = 1.f / 60.f;
+			o = ComputeMyopicControl(*out, in, st);
+		}
+		return o;
+	};
+
+	MyopicOutput still  = settle(cruise, 0.f);
+	MyopicOutput drift  = settle(3.f * cruise, 2.f * cruise); // same water speed
+
+	std::cerr << "[frame aquatic] cruise=" << cruise
+	          << " | still: turn=" << still.angular_velocity_rad_s.y
+	          << " stability=" << still.stability
+	          << " | in a 2x-cruise current at the same water speed: turn="
+	          << drift.angular_velocity_rad_s.y
+	          << " stability=" << drift.stability << "\n";
+
+	EXPECT_NEAR(drift.angular_velocity_rad_s.y, still.angular_velocity_rad_s.y, 1e-5f)
+		<< "a fin only ever sees the water";
+	EXPECT_NEAR(drift.stability,      still.stability,      1e-4f);
+	EXPECT_NEAR(drift.speed_headroom, still.speed_headroom, 1e-4f);
+	EXPECT_NEAR(drift.turn_headroom,  still.turn_headroom,  1e-4f);
+
+	// The other direction, so the equalities above are not two cases collapsing
+	// onto the same wrong answer: the SAME ground speed swimming into a current
+	// strong enough to leave the fish moving backwards through the water is a
+	// materially different condition. Under a ground-frame reading it would be
+	// identical to `still`.
+	MyopicOutput upstream = settle(cruise, 3.f * cruise);
+	std::cerr << "[frame aquatic] into a 3x-cruise current: turn="
+	          << upstream.angular_velocity_rad_s.y
+	          << " stability=" << upstream.stability << "\n";
+	EXPECT_GT(std::fabs(upstream.stability - still.stability), 1e-3f)
+		<< "the current has to be visible to a FIN";
+}
+
+// --- Presence: each arm is reached, and only when its section exists -------
+TEST(MyopicEnvelope, RemainingModesAppearExactlyWhenTheirAnalysisDoes)
+{
+	struct Row { const char* file; Env env; };
+	const Row rows[] = {
+		{"batto.glb", Env::Air},   {"cat.glb", Env::Air},
+		{"dragonfly.glb", Env::Air}, {"treefrog.glb", Env::Air},
+		{"eel.glb", Env::Ocean},   {"penguin.glb", Env::Ocean},
+		{"shark.glb", Env::Ocean}, {"penguin.glb", Env::Air},
+	};
+
+	int aquatic = 0, serpentine = 0, climbing = 0, brachiation = 0;
+	for (const Row& r : rows) {
+		const Output* out = Analyze(r.file, r.env);
+		ASSERT_NE(out, nullptr) << r.file;
+
+		const std::pair<LocomotionMode, bool> expected[] = {
+			{LocomotionMode::AQUATIC,     out->aquatic.has_value()},
+			{LocomotionMode::SERPENTINE,  out->serpentine.has_value()},
+			{LocomotionMode::CLIMBING,    out->climbing.has_value()},
+			{LocomotionMode::BRACHIATION, out->brachiation.has_value()},
+		};
+		for (auto [mode, has_section] : expected) {
+			auto env = ExtractEnvelope(*out, mode, 0, 9.81f);
+			EXPECT_EQ(env.has_value(), has_section)
+				<< r.file << " mode=" << int(mode);
+			if (!env.has_value()) continue;
+			switch (mode) {
+			case LocomotionMode::AQUATIC:     ++aquatic; break;
+			case LocomotionMode::SERPENTINE:  ++serpentine; break;
+			case LocomotionMode::CLIMBING:    ++climbing; break;
+			case LocomotionMode::BRACHIATION: ++brachiation; break;
+			default: break;
+			}
+			// Universal envelope sanity for every arm Task 7 adds.
+			EXPECT_GT(float(env->max_speed), 0.f) << r.file << " mode=" << int(mode);
+			EXPECT_GE(float(env->min_speed), 0.f) << r.file << " mode=" << int(mode);
+			EXPECT_LT(float(env->min_speed), float(env->max_speed)) << r.file << " mode=" << int(mode);
+			EXPECT_GT(float(env->max_accel), 0.f) << r.file << " mode=" << int(mode);
+			EXPECT_TRUE(std::isfinite(float(env->max_accel))) << r.file << " mode=" << int(mode);
+			EXPECT_GT(float(env->tau_linear), 0.f) << r.file << " mode=" << int(mode);
+			EXPECT_TRUE(std::isfinite(float(env->tau_linear))) << r.file << " mode=" << int(mode);
+			// Only aerial gets a load factor: buoyancy cancels weight for
+			// swimmers and legs re-plant each stride for everything else.
+			EXPECT_FALSE(env->aerial.has_value()) << r.file << " mode=" << int(mode);
+		}
+	}
+
+	std::cerr << "[coverage] aquatic=" << aquatic << " serpentine=" << serpentine
+	          << " climbing=" << climbing << " brachiation=" << brachiation << "\n";
+	EXPECT_GT(aquatic, 0);
+	EXPECT_GT(serpentine, 0);
+	EXPECT_GT(climbing, 0);
+	// brachiation is deliberately NOT asserted > 0: no sample model has arms
+	// long enough (>= 0.8 body lengths, tonton_climbing.cpp:456) to produce an
+	// Analysis_Brachiation, so that arm has no sample coverage at all. Raised as
+	// a follow-up finding rather than papered over with a fake assertion.
+	EXPECT_EQ(brachiation, 0)
+		<< "a sample gained a brachiation section -- give that arm real coverage";
+}
+
+// --- The climbing envelope tracks the analysis's climb speed ---------------
+TEST(MyopicEnvelope, ClimbingUsesTheStatedClimbSpeed)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->climbing.has_value());
+	auto env = ExtractEnvelope(*out, LocomotionMode::CLIMBING, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	std::cerr << "[climbing cat] max_speed=" << float(env->max_speed)
+	          << " max_accel=" << float(env->max_accel)
+	          << " tau=" << float(env->tau_linear) << "\n";
+
+	EXPECT_FLOAT_EQ(float(env->max_speed), float(out->climbing->max_climb_speed_m_s));
+	EXPECT_FLOAT_EQ(float(env->min_speed), 0.f) << "a climber can hang still";
+	// A climber stops by gripping, so braking is at least as strong as thrust.
+	EXPECT_GE(float(env->max_brake), float(env->max_accel));
+	// The climbing envelope is genuinely slower than the same cat's walk.
+	auto walk = ExtractEnvelope(*out, LocomotionMode::TERRESTRIAL, 0, 9.81f);
+	ASSERT_TRUE(walk.has_value());
+	EXPECT_LT(float(env->max_speed), float(walk->max_speed));
+}
+
+// --- C4: the non-aerial turn strategy is not a claim about the substrate ---
+//
+// TurnStrategy's first enumerator used to be GROUND, and MyopicOutput defaults
+// to it, so a swimming shark reported "GROUND" -- which a caller rolling a mesh
+// or picking an animation would read as a statement about the seabed. The
+// enumerator means "not a banked or yawed AERIAL turn"; LATERAL says that.
+TEST(MyopicEntryPoint, NonAerialModesReportALateralTurnNotAGroundOne)
+{
+	struct Row { const char* file; Env env; LocomotionMode mode; };
+	const Row rows[] = {
+		{"shark.glb",  Env::Ocean, LocomotionMode::AQUATIC},
+		{"eel.glb",    Env::Ocean, LocomotionMode::SERPENTINE},
+		{"cat.glb",    Env::Air,   LocomotionMode::CLIMBING},
+		{"cat.glb",    Env::Air,   LocomotionMode::TERRESTRIAL},
+	};
+
+	for (const Row& r : rows) {
+		const Output* out = Analyze(r.file, r.env);
+		ASSERT_NE(out, nullptr) << r.file;
+		auto env = ExtractEnvelope(*out, r.mode, 0, 9.81f);
+		ASSERT_TRUE(env.has_value()) << r.file << " mode=" << int(r.mode);
+		ASSERT_FALSE(env->aerial.has_value()) << r.file << " mode=" << int(r.mode);
+
+		MyopicState st{};
+		MyopicInput in;
+		in.mode            = r.mode;
+		in.target_mode     = r.mode;
+		in.target_position = TargetAtBearing(1.0f);
+		in.velocity_m_s    = glm::vec3(0.f, 0.f, 0.5f * float(env->max_speed));
+		in.dt_s            = 1.f / 60.f;
+		MyopicOutput o = ComputeMyopicControl(*out, in, st);
+
+		EXPECT_EQ(o.strategy, TurnStrategy::LATERAL) << r.file << " mode=" << int(r.mode);
+		EXPECT_FLOAT_EQ(o.bank_angle_rad, 0.f) << r.file << " mode=" << int(r.mode);
+	}
 }
