@@ -167,6 +167,7 @@ if(TONTON_BUILD_TESTS)
             tests/tonton_plausibility_tests.cpp
             tests/tonton_geometry_tests.cpp
             tests/tonton_wing_dump.cpp
+            tests/tonton_myopic_tests.cpp
             ${TONTON_TEST_PIPELINE_SOURCES}
         )
 
@@ -175,6 +176,7 @@ if(TONTON_BUILD_TESTS)
             ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
             ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
             ${CMAKE_SOURCE_DIR}/modules/tonton/include
+            ${CMAKE_SOURCE_DIR}/modules/tonton/src
             ${CMAKE_SOURCE_DIR}/modules/rintintin/include
             ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
         )
