@@ -426,3 +426,65 @@ TEST(MyopicSteer, FirstFrameMatchesExponentialSlew)
 		EXPECT_NEAR(r.turn_rate_rad_s, expected, 1e-4f) << "dt=" << dt;
 	}
 }
+
+TEST(MyopicStability, CruisingStraightIsComfortable)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.f;
+	cmd.current_speed_m_s = 2.f;   // well under max_speed 10
+	cmd.desired_speed_m_s = 2.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_GT(r.stability, 0.7f);
+	EXPECT_GT(r.speed_headroom, 0.7f);
+}
+
+TEST(MyopicStability, AtMaxSpeedStabilityReachesZero)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.f;
+	cmd.current_speed_m_s = 10.f;  // exactly max_speed
+	cmd.desired_speed_m_s = 10.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_NEAR(r.stability, 0.f, 0.02f);
+	EXPECT_NEAR(r.speed_headroom, 0.f, 0.02f);
+}
+
+TEST(MyopicStability, ExceedingMaxSpeedGoesNegative)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.f;
+	cmd.current_speed_m_s = 15.f;  // 1.5x max_speed
+	cmd.desired_speed_m_s = 15.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_LT(r.stability, 0.f);
+}
+
+TEST(MyopicStability, DemandingMoreThanTheGaitSuggestsAChange)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.f;
+	cmd.current_speed_m_s = 5.f;
+	cmd.desired_speed_m_s = 20.f;  // twice max_speed
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_TRUE(r.suggest_gait_change);
+}
