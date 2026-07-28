@@ -559,3 +559,41 @@ TEST(MyopicStability, BelowMinSpeedDrivesStabilityNegative)
 	// u_stall were stubbed to 0, stability would read 0.9 (positive).
 	EXPECT_LT(r.stability, 0.f);
 }
+
+TEST(MyopicEnvelope, AerialInvariants)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value()) << "bat should fly";
+
+	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	EXPECT_GT(float(env->max_speed), 0.f);
+	EXPECT_GT(float(env->min_speed), 0.f) << "a flyer has a stall speed";
+	EXPECT_LT(float(env->min_speed), float(env->max_speed));
+
+	// The derived-from-power acceleration must be real, not zero or NaN.
+	EXPECT_GT(float(env->max_accel), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->max_accel)));
+	EXPECT_GT(float(env->tau_linear), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->tau_linear)));
+
+	ASSERT_TRUE(env->aerial.has_value());
+	EXPECT_GE(env->aerial->n_max, 1.f) << "load factor cannot be below 1";
+	EXPECT_TRUE(std::isfinite(env->aerial->n_max));
+	EXPECT_GT(float(env->aerial->max_roll_rate), 0.f);
+}
+
+TEST(MyopicEnvelope, AerialAccelerationIsPlausible)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	// A flying animal accelerates within roughly an order of magnitude of g.
+	// Far outside this band means the P = F*v derivation has a units error.
+	EXPECT_GT(float(env->max_accel), 0.1f);
+	EXPECT_LT(float(env->max_accel), 100.f);
+}
