@@ -560,11 +560,54 @@ TEST(MyopicStability, BelowMinSpeedDrivesStabilityNegative)
 	EXPECT_LT(r.stability, 0.f);
 }
 
+
+// ---------------------------------------------------------------------------
+// Aerial envelope.
+//
+// The reference flyer here is the DRAGONFLY, not the bat. batto.glb is affected
+// by the documented clade-misclassification red (Species.Bat): it is detected as
+// bare CHORDATA rather than MAMMALIA, so its metabolic block is built from the
+// wrong coefficients. The consequence is that its own analysis layer already
+// reports `can_sustain_level_flight == false` and its mechanical cruise power
+// (280 W) exceeds its available muscle power (153 W) -- i.e. TonTon says this
+// bat cannot fly level, so there is by definition no power surplus with which to
+// accelerate. See AerialPresenceFollowsPowerSurplus below, which asserts that
+// consistency directly rather than papering over it.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Closed-form load-factor limit, recomputed in the test from the analysis
+// fields so that any change to the implementation's formula (or to the speed it
+// is evaluated at) shows up as a failure rather than being absorbed.
+float ExpectedLoadFactor(const Analysis_Aerial& a, float g)
+{
+	const float v_c = float(a.cruise_speed_m_s);
+	const float v_s = float(a.min_flight_speed_m_s);
+	const float r   = float(a.min_turning_radius_m);
+	const float n_aero   = std::pow(v_c / v_s, 2.f);
+	const float n_radius = std::sqrt(1.f + std::pow((v_c * v_c) / (g * r), 2.f));
+	return std::min(n_aero, n_radius);
+}
+
+// Closed-form accelerating budget: the MECHANICAL surplus (muscle mechanical
+// output minus the mechanical power level cruise already consumes) turned into
+// an acceleration via P = F*v, F = m*a.
+float ExpectedMaxAccel(const Output& o)
+{
+	const auto& a = *o.aerial;
+	const float surplus = std::max(0.f,
+		float(o.metabolic.available_muscle_power_W)
+		- float(a.flapping_power_mechanical_W));
+	return surplus / (float(o.physical.body_mass_kg) * float(a.cruise_speed_m_s));
+}
+
+} // namespace
+
 TEST(MyopicEnvelope, AerialInvariants)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
 	ASSERT_NE(out, nullptr);
-	ASSERT_TRUE(out->aerial.has_value()) << "bat should fly";
+	ASSERT_TRUE(out->aerial.has_value()) << "dragonfly should fly";
 
 	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
 	ASSERT_TRUE(env.has_value());
@@ -576,26 +619,102 @@ TEST(MyopicEnvelope, AerialInvariants)
 	// The derived-from-power acceleration must be real, not zero or NaN.
 	EXPECT_GT(float(env->max_accel), 0.f);
 	EXPECT_TRUE(std::isfinite(float(env->max_accel)));
+	EXPECT_GT(float(env->max_brake), 0.f) << "a flyer that cannot decelerate cannot be steered";
 	EXPECT_GT(float(env->tau_linear), 0.f);
 	EXPECT_TRUE(std::isfinite(float(env->tau_linear)));
+
+	// A flyer always has a finite minimum turn radius (it cannot pivot in place,
+	// unlike a standing quadruped, for which 0 is legitimate).
+	EXPECT_GT(float(env->min_turn_radius), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->min_turn_radius)));
 
 	ASSERT_TRUE(env->aerial.has_value());
 	EXPECT_GE(env->aerial->n_max, 1.f) << "load factor cannot be below 1";
 	EXPECT_TRUE(std::isfinite(env->aerial->n_max));
 	EXPECT_GT(float(env->aerial->max_roll_rate), 0.f);
+	EXPECT_GT(float(env->aerial->max_yaw_rate), 0.f);
+
+	// UPSTREAM GAP: max_pitch_rate_rad_s is 0 for every sample -- the analysis
+	// layer never populates it (max_roll_rate_rad_s and max_yaw_rate_rad_s are
+	// populated, pitch is not). Do NOT assert > 0: that would be asserting a
+	// number TonTon does not compute. Assert only that it is a usable float, and
+	// leave Task 5 to route around a zero pitch authority explicitly.
+	EXPECT_GE(float(env->aerial->max_pitch_rate), 0.f);
+	EXPECT_TRUE(std::isfinite(float(env->aerial->max_pitch_rate)));
+
+	// AerialAuthority's speeds must be the same numbers the envelope reports.
+	EXPECT_FLOAT_EQ(float(env->aerial->stall_speed), float(env->min_speed));
+	EXPECT_LT(float(env->aerial->stall_speed), float(env->aerial->cruise_speed));
+	EXPECT_LT(float(env->aerial->cruise_speed), float(env->max_speed));
 
 	// n_max == 1 exactly means g*sqrt(n^2-1) == 0: an animal that flies but
 	// cannot turn. That is never a physical answer, only a symptom of a bad
-	// load-factor input being caught by the n>=1 floor. Assert it here so the
-	// clamp can never silently hide a non-physical intermediate again.
+	// load-factor input being caught by a floor. Assert it here so the fallback
+	// can never silently hide a non-physical intermediate again.
 	EXPECT_GT(env->aerial->n_max, 1.f) << "a flyer whose load factor floors at 1 cannot bank";
 	EXPECT_GT(float(env->max_lateral_accel), 0.f) << "a flyer must be able to turn";
 	EXPECT_TRUE(std::isfinite(float(env->max_lateral_accel)));
 }
 
+// Pins the load factor to its closed form, computed here from the analysis
+// fields (no species-specific magic numbers). Run at two gravities so that both
+// budgets get to be the binding one: at 9.81 the stated-radius budget binds for
+// this sample, at lunar gravity the radius budget relaxes and the aerodynamic
+// V-n budget binds. Without the second case a change to the aerodynamic branch
+// alone (e.g. evaluating it at max speed rather than cruise) would be invisible.
+TEST(MyopicEnvelope, AerialLoadFactorMatchesClosedForm)
+{
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	const auto& a = *out->aerial;
+
+	for (float g : {9.81f, 1.62f}) {
+		auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, g);
+		ASSERT_TRUE(env.has_value()) << "g = " << g;
+		ASSERT_TRUE(env->aerial.has_value()) << "g = " << g;
+		const float expected = ExpectedLoadFactor(a, g);
+		EXPECT_NEAR(env->aerial->n_max, expected, 1e-3f * std::max(1.f, expected))
+			<< "g = " << g << ", n_max = " << env->aerial->n_max
+			<< ", closed form = " << expected;
+
+		// max_lateral_accel must be the banking identity of that same n_max, and
+		// min_turn_radius must be reconciled with it (never optimistic).
+		EXPECT_NEAR(float(env->max_lateral_accel),
+		            g * std::sqrt(std::max(0.f, expected * expected - 1.f)),
+		            1e-2f * g) << "g = " << g;
+		EXPECT_GE(float(env->min_turn_radius),
+		          std::pow(float(a.cruise_speed_m_s), 2.f) / float(env->max_lateral_accel) - 1e-3f)
+			<< "stated turn radius is tighter than the load factor allows, g = " << g;
+	}
+}
+
+// Pins max_accel to its closed form. Kills both "AccelFromPower returns a
+// constant" and "AccelFromPower divides by mass^2": neither reproduces
+// surplus / (m * v_cruise).
+TEST(MyopicEnvelope, AerialMaxAccelMatchesClosedForm)
+{
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+
+	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+
+	const float expected = ExpectedMaxAccel(*out);
+	ASSERT_GT(expected, 0.f) << "sample has no power surplus; pick another flyer";
+	EXPECT_NEAR(float(env->max_accel), expected, 1e-3f * expected)
+		<< "max_accel = " << float(env->max_accel) << ", closed form = " << expected;
+
+	// tau is that acceleration worked against cruise speed.
+	EXPECT_NEAR(float(env->tau_linear),
+	            float(out->aerial->cruise_speed_m_s) / expected,
+	            1e-3f * float(out->aerial->cruise_speed_m_s) / expected);
+}
+
 TEST(MyopicEnvelope, AerialAccelerationIsPlausible)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
 	ASSERT_NE(out, nullptr);
 	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
 	ASSERT_TRUE(env.has_value());
@@ -605,8 +724,30 @@ TEST(MyopicEnvelope, AerialAccelerationIsPlausible)
 	EXPECT_GT(float(env->max_accel), 0.1f);
 	EXPECT_LT(float(env->max_accel), 100.f);
 
-	// Banked turns of biological flyers sit around 1.5-4 g. Anything past ~10 g
-	// would mean the load-factor derivation has lost its footing.
+	// Banked turns of biological flyers sit around 1.5-4 g; dragonflies are the
+	// extreme end, measured at 3-9 g in prey-capture turns. Past ~10 g would
+	// mean the load-factor derivation has lost its footing.
 	ASSERT_TRUE(env->aerial.has_value());
 	EXPECT_LT(env->aerial->n_max, 10.f) << "n_max = " << env->aerial->n_max;
+}
+
+// The bat: an envelope exists if and only if there is a mechanical power
+// surplus. This is deliberately written as a consistency check rather than
+// "batto returns nullopt", so that it stays correct once the Species.Bat clade
+// bug is fixed and the bat acquires a real surplus.
+TEST(MyopicEnvelope, AerialPresenceFollowsPowerSurplus)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+
+	const float expected = ExpectedMaxAccel(*out);
+	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
+	EXPECT_EQ(env.has_value(), expected > 0.f)
+		<< "surplus-derived accel = " << expected;
+
+	// And the surplus must agree with the analysis layer's own verdict: no
+	// surplus <=> it says the animal cannot hold level flight.
+	EXPECT_EQ(expected > 0.f, out->aerial->can_sustain_level_flight)
+		<< "envelope power budget disagrees with can_sustain_level_flight";
 }
