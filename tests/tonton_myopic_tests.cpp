@@ -22,6 +22,7 @@
 
 #include "tonton_myopic.h"
 #include "Control/tonton_envelope.h"
+#include "Control/tonton_steer.h"
 
 #ifndef TONTON_SAMPLE_MODELS_DIR
 #define TONTON_SAMPLE_MODELS_DIR "sample models"
@@ -184,8 +185,6 @@ TEST(MyopicEnvelope, AbsentModeReturnsNullopt)
 	EXPECT_FALSE(ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f).has_value());
 }
 
-#include "Control/tonton_steer.h"
-
 namespace {
 
 // A minimal envelope for pure control-law tests. No Output involved, which is
@@ -225,6 +224,35 @@ float SimulateTurn(float dt, float total_time_s, float initial_error_rad)
 	return error;
 }
 
+// Same maneuver as SimulateTurn, but returns the heading error at an
+// intermediate wall-clock time instead of running to the end. The terminal
+// error alone cannot detect framerate-dependent response *shape*: the greedy
+// term forces exact termination for any law that finishes inside the
+// simulated window, so by the end of a long-enough run every law's error
+// converges to (near) zero regardless of how it got there. Mid-slew, at
+// t=0.3s here, the laws are still separating and a dt-dependent law (a bare
+// constant lerp factor, the literal 2025 failure) is caught red-handed.
+float SimulateTurnAtTime(float dt, float target_time_s, float initial_error_rad)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+	float error = initial_error_rad;
+	float speed = 5.f;
+
+	const int steps = static_cast<int>(std::lround(target_time_s / dt));
+	for (int i = 0; i < steps; ++i) {
+		SteerCommand cmd;
+		cmd.angle_error_rad   = error;
+		cmd.current_speed_m_s = speed;
+		cmd.desired_speed_m_s = speed;
+		cmd.dt_s              = dt;
+
+		SteerResult r = Steer(env, state, cmd);
+		error -= r.turn_rate_rad_s * dt;
+	}
+	return error;
+}
+
 } // namespace
 
 // THE regression test for the 2025 failure. A dt-dependent control law
@@ -242,6 +270,23 @@ TEST(MyopicFramerate, TrajectoryConvergesAcrossTimesteps)
 	EXPECT_NEAR(e16,  e60, 0.05f) << "16 Hz diverges from 60 Hz";
 	EXPECT_NEAR(e30,  e60, 0.05f) << "30 Hz diverges from 60 Hz";
 	EXPECT_NEAR(e120, e60, 0.05f) << "120 Hz diverges from 60 Hz";
+
+	// Mid-trajectory check (added in review round 1): the terminal-only
+	// assertions above pass for a bare constant lerp factor (alpha=0.10,
+	// ignoring dt) at all four rates -- exact termination hides the shape
+	// difference. At t=0.3s the real controller's four rates still agree to
+	// within ~0.04 rad, while the constant-lerp controller's disagree by
+	// ~0.09-0.14 rad at the same point (measured with a standalone stub;
+	// see task-2-report.md). 0.05 rad separates the two cleanly.
+	const float mid_t = 0.3f;
+	float m16  = SimulateTurnAtTime(1.f / 16.f,  mid_t, start);
+	float m30  = SimulateTurnAtTime(1.f / 30.f,  mid_t, start);
+	float m60  = SimulateTurnAtTime(1.f / 60.f,  mid_t, start);
+	float m120 = SimulateTurnAtTime(1.f / 120.f, mid_t, start);
+
+	EXPECT_NEAR(m16,  m60, 0.05f) << "mid-trajectory (t=0.3s): 16 Hz diverges from 60 Hz";
+	EXPECT_NEAR(m30,  m60, 0.05f) << "mid-trajectory (t=0.3s): 30 Hz diverges from 60 Hz";
+	EXPECT_NEAR(m120, m60, 0.05f) << "mid-trajectory (t=0.3s): 120 Hz diverges from 60 Hz";
 }
 
 // A PD controller cannot pass this. Clamped-greedy-plus-slew cannot fail it.
@@ -303,4 +348,35 @@ TEST(MyopicSteer, StandingCreatureCanPivot)
 	SteerResult r = Steer(env, state, cmd);
 	EXPECT_GT(r.turn_rate_rad_s, 0.f) << "a standing animal must be able to turn";
 	EXPECT_TRUE(std::isfinite(r.turn_rate_rad_s));
+}
+
+// Added in review round 1 (C2): every test above passed with the exponential
+// slew deleted outright (rate = clamp(error/dt, +/-omega_max), no SlewAlpha,
+// no Approach, no SteerState) -- the 1-exp(-dt/tau) shape this whole task
+// exists to establish was unasserted. This pins the FIRST frame from a
+// zeroed state to exactly demand * (1 - exp(-dt/tau)), at two different dt,
+// which only holds if the slew is actually applied.
+TEST(MyopicSteer, FirstFrameMatchesExponentialSlew)
+{
+	for (float dt : {1.f / 60.f, 1.f / 30.f}) {
+		Envelope env = TestEnvelope();
+		SteerState state{}; // zeroed: prev_turn_rate_rad_s == 0
+
+		SteerCommand cmd;
+		cmd.angle_error_rad   = 1.0f; // small enough that no bound clips the demand
+		cmd.current_speed_m_s = 5.f;
+		cmd.desired_speed_m_s = 5.f;
+		cmd.dt_s              = dt;
+
+		// Recompute the expected demand exactly as Steer does: greedy,
+		// clamped by the lateral-accel budget at this speed.
+		const float omega_max = float(env.max_lateral_accel) / cmd.current_speed_m_s;
+		const float greedy     = cmd.angle_error_rad / dt;
+		const float demand     = std::clamp(greedy, -omega_max, omega_max);
+		const float alpha      = 1.f - std::exp(-dt / float(env.tau_linear));
+		const float expected   = demand * alpha;
+
+		SteerResult r = Steer(env, state, cmd);
+		EXPECT_NEAR(r.turn_rate_rad_s, expected, 1e-4f) << "dt=" << dt;
+	}
 }
