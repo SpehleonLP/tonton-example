@@ -1396,3 +1396,30 @@ TEST(MyopicSteer, ZeroAuthorityReadingDoesNotSwallowTheStandingCase)
 	EXPECT_NEAR(r.turn_headroom, 1.f, 1e-6f);
 }
 
+
+// The lateral-force cross-check on yaw (G3) is derived from the load factor,
+// a_lat = g*sqrt(n^2 - 1), which is identically 0 at zero gravity for EVERY n.
+// Applied naively that says a zero-g flyer cannot turn at all -- but that is the
+// formula being undefined without a weight vector, not a physical bound: a wing
+// or tail makes side force whether or not anything is falling. TonTon explicitly
+// supports low- and zero-gravity worlds, so the budget must read as unknown
+// there, leaving max_yaw_rate to stand alone.
+TEST(MyopicBank, ZeroGravityDoesNotAbolishYawAuthority)
+{
+	Envelope env = DragonflyLikeEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd = TurnCommand(1.57f, 4.f);
+	cmd.gravity_m_s2 = 0.f;
+
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, cmd);
+
+	// Banking trades weight for centripetal force, so with no weight there is
+	// nothing to trade: the strategy must fall back to yaw, not to paralysis.
+	EXPECT_EQ(r.strategy, TurnStrategy::YAW);
+	EXPECT_NEAR(r.bank_angle_rad, 0.f, 1e-6f) << "there is no bank without weight";
+	EXPECT_NEAR(r.turn_rate_rad_s, float(env.aerial->max_yaw_rate), 1e-3f)
+		<< "yaw authority is the only bound that survives zero gravity";
+	EXPECT_TRUE(std::isfinite(r.turn_headroom));
+}
