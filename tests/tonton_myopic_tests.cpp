@@ -25,6 +25,7 @@
 #include "tonton_myopic.h"
 #include "Control/tonton_envelope.h"
 #include "Control/tonton_steer.h"
+#include "Control/tonton_launch.h"
 
 #ifndef TONTON_SAMPLE_MODELS_DIR
 #define TONTON_SAMPLE_MODELS_DIR "sample models"
@@ -1566,4 +1567,564 @@ TEST(MyopicBank, LiftAccelIsGravityInvariantWhenStallSpeedScales)
 	EXPECT_LT(lat_luna, expected_lift);            // a_lift is the ceiling
 	EXPECT_LT(lat_luna, lat_earth * 1.5f)
 		<< "spread across a 6x gravity change must stay small, not 560x";
+}
+
+
+// ===========================================================================
+// Task 6: launch planning and the ComputeMyopicControl entry point.
+// ===========================================================================
+
+namespace {
+
+// Facing +Z with +Y up. A target at world bearing `b` (measured the same way,
+// so bearing 0 is dead ahead) sits far enough away that a few frames of travel
+// do not appreciably move it.
+glm::vec3 TargetAtBearing(float b, float distance_m = 1000.f)
+{
+	return distance_m * glm::vec3(std::sin(b), 0.f, std::cos(b));
+}
+
+MyopicInput GroundChase(float bearing_rad, float speed_m_s, float dt_s)
+{
+	MyopicInput in;
+	in.mode            = LocomotionMode::TERRESTRIAL;
+	in.target_mode     = LocomotionMode::TERRESTRIAL;
+	in.substrate       = Substrate::GROUND;
+	in.orientation     = glm::quat(1.f, 0.f, 0.f, 0.f); // forward = +Z
+	in.position        = glm::vec3(0.f);
+	in.target_position = TargetAtBearing(bearing_rad);
+	in.velocity_m_s    = glm::vec3(0.f, 0.f, speed_m_s);
+	in.desired_speed_m_s = speed_m_s;
+	in.dt_s            = dt_s;
+	return in;
+}
+
+// Integrate heading only (position held at the origin, target 1 km out) and
+// return the signed heading error remaining after `t_end_s`. Position is held
+// fixed on purpose: this measures the CONTROL LAW, not the pursuit geometry.
+float SimulateEntryPointHeading(const Output& analysis, float dt, float t_end_s,
+                                float initial_bearing_rad, float speed_m_s = 3.f)
+{
+	MyopicState st{};
+	float yaw = 0.f; // creature heading, about +Y; 0 = facing +Z
+	const int steps = int(std::lround(t_end_s / dt));
+	for (int i = 0; i < steps; ++i) {
+		MyopicInput in = GroundChase(initial_bearing_rad, speed_m_s, dt);
+		in.orientation  = glm::angleAxis(yaw, glm::vec3(0.f, 1.f, 0.f));
+		in.velocity_m_s = (in.orientation * glm::vec3(0.f, 0.f, 1.f)) * speed_m_s;
+		MyopicOutput o = ComputeMyopicControl(analysis, in, st);
+		yaw += o.angular_velocity_rad_s.y * dt;
+	}
+	return initial_bearing_rad - yaw;
+}
+
+} // namespace
+
+// --- Launch planning -------------------------------------------------------
+
+// The plan asserted "a hovering insect launches vertically" and expected
+// readiness == 1 from a standstill. The analysis layer disagrees: dragonfly.glb
+// classifies as RUNNING_TAKEOFF, with a takeoff run of 0.020 m against a
+// minimum flight speed of 2.631 m/s. Two centimetres of runway IS morally a
+// vertical launch, so the numbers are not absurd -- but the MODE is what
+// PlanLaunch dispatches on, and reporting a launch the analysis did not
+// classify would be inventing biology at the control layer. Pinned so the
+// disagreement stays visible instead of being smoothed over.
+TEST(MyopicLaunch, DragonflyIsClassifiedRunningTakeoffNotVerticalLaunch)
+{
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	ASSERT_EQ(out->aerial->takeoff.mode,
+	          Analysis_TakeoffAnalysis::TakeoffMode::RUNNING_TAKEOFF)
+		<< "if this ever becomes VERTICAL_LAUNCH the expectations below are wrong";
+	EXPECT_LT(float(out->aerial->takeoff.takeoff_run_distance_m), 0.05f)
+		<< "the 'runway' the analysis asks for is 2 cm";
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	in.substrate   = Substrate::GROUND;
+
+	const float v_min = float(out->aerial->min_flight_speed_m_s);
+
+	LaunchPlan cold = PlanLaunch(*out, in, 0.f);
+	EXPECT_TRUE(cold.feasible) << "flat ground is a runway";
+	EXPECT_TRUE(cold.accelerate_along_heading);
+	EXPECT_NEAR(cold.readiness, 0.f, 1e-6f) << "no airspeed, no lift";
+	EXPECT_EQ(cold.blocking_reason, BlockingReason::NEEDS_RUNWAY_SPEED);
+	EXPECT_NEAR(cold.required_airspeed_m_s, v_min, 1e-4f);
+
+	LaunchPlan half = PlanLaunch(*out, in, 0.5f * v_min);
+	EXPECT_NEAR(half.readiness, 0.5f, 1e-4f);
+
+	LaunchPlan hot = PlanLaunch(*out, in, v_min);
+	EXPECT_NEAR(hot.readiness, 1.f, 1e-4f);
+	EXPECT_EQ(hot.blocking_reason, BlockingReason::NONE);
+}
+
+TEST(MyopicLaunch, NonFlyerReportsNoAerialAnalysis)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_FALSE(out->aerial.has_value());
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+
+	LaunchPlan p = PlanLaunch(*out, in, 0.f);
+	EXPECT_FALSE(p.feasible);
+	EXPECT_EQ(p.blocking_reason, BlockingReason::NO_AERIAL_ANALYSIS);
+	EXPECT_EQ(p.readiness, 0.f);
+}
+
+// batto.glb IS RUNNING_TAKEOFF (verified by the ASSERT below), which is the
+// only takeoff mode whose readiness depends on airspeed at all -- every other
+// arm returns a constant and would make a monotonicity sweep vacuous. So the
+// sweep is kept AND given teeth: readiness must actually rise, and it must
+// reach saturation, not merely fail to fall.
+TEST(MyopicLaunch, ReadinessIsMonotoneAndActuallyRisesWithAirspeed)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	ASSERT_EQ(out->aerial->takeoff.mode,
+	          Analysis_TakeoffAnalysis::TakeoffMode::RUNNING_TAKEOFF)
+		<< "a constant-readiness mode would make this sweep prove nothing";
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	in.substrate   = Substrate::GROUND;
+
+	float prev = -1.f;
+	int   rises = 0;
+	float max_readiness = 0.f;
+	for (float v = 0.f; v <= 30.f; v += 2.f) {
+		LaunchPlan p = PlanLaunch(*out, in, v);
+		EXPECT_GE(p.readiness, prev) << "readiness dropped at airspeed " << v;
+		EXPECT_LE(p.readiness, 1.f);
+		EXPECT_GE(p.readiness, 0.f);
+		if (p.readiness > prev + 1e-6f) ++rises;
+		max_readiness = std::max(max_readiness, p.readiness);
+		prev = p.readiness;
+	}
+	EXPECT_GE(rises, 3) << "a constant readiness is trivially monotone";
+	EXPECT_NEAR(max_readiness, 1.f, 1e-4f)
+		<< "30 m/s must be enough runway speed for this creature";
+	EXPECT_NEAR(PlanLaunch(*out, in, 0.f).readiness, 0.f, 1e-6f);
+}
+
+TEST(MyopicLaunch, RunningTakeoffNeedsARunwaySubstrate)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+
+	for (Substrate s : {Substrate::WATER, Substrate::PERCH, Substrate::CLIFF_EDGE}) {
+		in.substrate = s;
+		LaunchPlan p = PlanLaunch(*out, in, 100.f); // plenty of airspeed
+		EXPECT_FALSE(p.feasible)                  << "substrate " << int(s);
+		EXPECT_FALSE(p.accelerate_along_heading)  << "substrate " << int(s);
+		EXPECT_EQ(p.readiness, 0.f)               << "substrate " << int(s);
+	}
+
+	in.substrate = Substrate::GROUND;
+	EXPECT_TRUE(PlanLaunch(*out, in, 100.f).feasible);
+}
+
+// penguin.glb in air is IMPOSSIBLE with wing_loading_ok == false, which is the
+// first constraint FirstFailedConstraint tests -- so this pins the IMPOSSIBLE
+// arm and the constraint ordering together.
+TEST(MyopicLaunch, ImpossibleTakeoffReportsItsFirstFailedConstraint)
+{
+	const Output* out = Analyze("penguin.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	ASSERT_EQ(out->aerial->takeoff.mode,
+	          Analysis_TakeoffAnalysis::TakeoffMode::IMPOSSIBLE);
+	ASSERT_FALSE(out->aerial->takeoff.constraints.wing_loading_ok);
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	in.substrate   = Substrate::GROUND;
+
+	LaunchPlan p = PlanLaunch(*out, in, 1000.f); // no amount of speed helps
+	EXPECT_FALSE(p.feasible);
+	EXPECT_EQ(p.readiness, 0.f);
+	EXPECT_EQ(p.blocking_reason, BlockingReason::WING_LOADING);
+}
+
+// --- Airspeed discipline ---------------------------------------------------
+
+// The airspeed-versus-ground-speed inversion is the likeliest bug in the
+// module, so it gets its own test.
+TEST(MyopicAirspeed, HeadwindMakesLaunchEasierThanTailwind)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	MyopicState st_head{}, st_tail{};
+
+	MyopicInput base;
+	base.mode         = LocomotionMode::TERRESTRIAL;
+	base.target_mode  = LocomotionMode::AERIAL;
+	base.substrate    = Substrate::GROUND;
+	base.velocity_m_s = glm::vec3(5.f, 0.f, 0.f); // same ground speed both times
+	base.dt_s         = 1.f / 60.f;
+
+	MyopicInput headwind = base;
+	headwind.medium_velocity_m_s = glm::vec3(-5.f, 0.f, 0.f); // blowing against us
+
+	MyopicInput tailwind = base;
+	tailwind.medium_velocity_m_s = glm::vec3(5.f, 0.f, 0.f);  // blowing with us
+
+	MyopicOutput h = ComputeMyopicControl(*out, headwind, st_head);
+	MyopicOutput t = ComputeMyopicControl(*out, tailwind, st_tail);
+
+	EXPECT_GT(h.transition_readiness, t.transition_readiness)
+		<< "a headwind must make takeoff easier at the same ground speed";
+
+	// And pin the arithmetic, not just the ordering: airspeed is 10 and 0 m/s
+	// respectively against a 7.867 m/s requirement.
+	const float v_min = float(out->aerial->min_flight_speed_m_s);
+	EXPECT_NEAR(h.transition_readiness, std::min(1.f, 10.f / v_min), 1e-4f);
+	EXPECT_NEAR(t.transition_readiness, 0.f, 1e-6f);
+}
+
+TEST(MyopicAirspeed, StillAirReadinessSitsBetweenHeadAndTailwind)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	const float v_min = float(out->aerial->min_flight_speed_m_s);
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	in.substrate   = Substrate::GROUND;
+	in.velocity_m_s = glm::vec3(5.f, 0.f, 0.f);
+
+	MyopicState st{};
+	MyopicOutput o = ComputeMyopicControl(*out, in, st);
+	EXPECT_NEAR(o.transition_readiness, 5.f / v_min, 1e-4f);
+}
+
+// --- The entry point -------------------------------------------------------
+
+TEST(MyopicEntryPoint, ProducesFiniteOutputForEveryModel)
+{
+	struct Case { const char* file; Env env; };
+	const Case cases[] = {
+		{"cat.glb", Env::Air}, {"dragonfly.glb", Env::Air},
+		{"batto.glb", Env::Air}, {"penguin.glb", Env::Ocean},
+	};
+
+	for (auto const& c : cases) {
+		const Output* out = Analyze(c.file, c.env);
+		ASSERT_NE(out, nullptr) << c.file;
+
+		MyopicState state{};
+		MyopicInput in;
+		in.mode            = LocomotionMode::TERRESTRIAL;
+		in.target_mode     = LocomotionMode::TERRESTRIAL;
+		in.target_position = glm::vec3(10.f, 0.f, 3.f);
+		in.dt_s            = 1.f / 60.f;
+
+		MyopicOutput o = ComputeMyopicControl(*out, in, state);
+
+		// NOTE, because it is easy to misread this fixture: velocity_m_s is
+		// left at zero, so every one of these four is STANDING. A standing
+		// animal pivots in place (no moving-frame constraint applies), so all
+		// three demand/capacity ratios read 0 and stability is exactly 1 for
+		// every model. This case therefore says nothing about turn saturation;
+		// the moving sweep below is where the interesting numbers are.
+		// (The heading error is also not the ~18 degrees it looks like:
+		// forward is +Z, so a target at (10, 0, 3) is atan2(10, 3) = 73.3
+		// degrees off the nose.)
+		EXPECT_EQ(o.stability, 1.f) << c.file << ": a standing pivot is unconstrained";
+
+		EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.x)) << c.file;
+		EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.y)) << c.file;
+		EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.z)) << c.file;
+		EXPECT_TRUE(std::isfinite(o.angular_velocity_rad_s.y)) << c.file;
+		EXPECT_TRUE(std::isfinite(o.stability)) << c.file;
+		EXPECT_TRUE(std::isfinite(o.bank_angle_rad)) << c.file;
+		// Every one of these four has a terrestrial section, so a control
+		// solution must actually have been computed.
+		EXPECT_EQ(o.blocking_reason, BlockingReason::NONE) << c.file;
+
+		std::cerr << "[standing] " << c.file << " stability=" << o.stability
+		          << " speed_headroom=" << o.speed_headroom
+		          << " turn_headroom=" << o.turn_headroom << "\n";
+
+		// The same maneuver actually MOVING, at half the gait's top speed.
+		// This is the case Task 5 flagged: u_turn's numerator is the unclamped
+		// desired rate error/max(tau, dt), so a 73-degree heading change that
+		// the creature will nevertheless execute perfectly well reads deeply
+		// negative. Measured, reported, deliberately NOT clamped -- the
+		// numerator is what makes the turn channel capable of exceeding 1 at
+		// all. Only finiteness is asserted; the magnitudes are diagnostics.
+		auto envelope = ExtractEnvelope(*out, LocomotionMode::TERRESTRIAL, 0, 9.81f);
+		ASSERT_TRUE(envelope.has_value()) << c.file;
+		const float v = 0.5f * float(envelope->max_speed);
+
+		MyopicState moving_state{};
+		MyopicInput mv = in;
+		mv.velocity_m_s      = glm::vec3(0.f, 0.f, v);
+		mv.desired_speed_m_s = v;
+		MyopicOutput m = ComputeMyopicControl(*out, mv, moving_state);
+
+		EXPECT_TRUE(std::isfinite(m.stability)) << c.file;
+		EXPECT_TRUE(std::isfinite(m.angular_velocity_rad_s.y)) << c.file;
+		EXPECT_TRUE(std::isfinite(m.linear_acceleration_m_s2.z)) << c.file;
+		std::cerr << "[moving @" << v << " m/s] " << c.file
+		          << " stability=" << m.stability
+		          << " speed_headroom=" << m.speed_headroom
+		          << " turn_headroom=" << m.turn_headroom
+		          << " turn_rate=" << m.angular_velocity_rad_s.y << "\n";
+	}
+}
+
+// C3: "no envelope for this mode" is a CALLER error and must not be encoded in
+// a physical output channel.
+TEST(MyopicEntryPoint, MissingModeIsReportedByBlockingReasonNotStability)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_FALSE(out->aerial.has_value());
+
+	MyopicState st{};
+	MyopicInput in;
+	in.mode        = LocomotionMode::AERIAL;   // the cat cannot fly
+	in.target_mode = LocomotionMode::AERIAL;
+	in.dt_s        = 1.f / 60.f;
+
+	MyopicOutput o = ComputeMyopicControl(*out, in, st);
+	EXPECT_EQ(o.blocking_reason, BlockingReason::MODE_UNAVAILABLE);
+	EXPECT_EQ(o.angular_velocity_rad_s.y, 0.f);
+	EXPECT_EQ(o.linear_acceleration_m_s2, glm::vec3(0.f));
+	// The state must not have been advanced by a frame that computed nothing.
+	EXPECT_EQ(st.prev_turn_rate_rad_s, 0.f);
+	EXPECT_EQ(st.prev_accel_m_s2, 0.f);
+}
+
+// ...and the other half of C3: a genuine stability of -1 is an ordinary
+// reading (a creature demanding twice the turn authority it owns) and must be
+// reported with blocking_reason NONE. Bisected rather than hardcoded so the
+// test does not bake in cat.glb's exact lateral budget.
+TEST(MyopicEntryPoint, ARealNegativeOneStabilityIsNotAnErrorSentinel)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	auto stability_at = [&](float bearing) {
+		MyopicState st{};
+		MyopicInput in = GroundChase(bearing, 3.f, 1.f / 60.f);
+		return ComputeMyopicControl(*out, in, st).stability;
+	};
+
+	// Monotone decreasing in |bearing| through the turn-saturated band.
+	ASSERT_GT(stability_at(0.f), -1.f);
+	ASSERT_LT(stability_at(1.f), -1.f);
+
+	float lo = 0.f, hi = 1.f;
+	for (int i = 0; i < 60; ++i) {
+		const float mid = 0.5f * (lo + hi);
+		(stability_at(mid) > -1.f ? lo : hi) = mid;
+	}
+
+	MyopicState st{};
+	MyopicInput in = GroundChase(0.5f * (lo + hi), 3.f, 1.f / 60.f);
+	MyopicOutput o = ComputeMyopicControl(*out, in, st);
+
+	EXPECT_NEAR(o.stability, -1.f, 1e-3f);
+	EXPECT_EQ(o.blocking_reason, BlockingReason::NONE)
+		<< "stability == -1 is a turn the creature cannot hold, not an error";
+}
+
+// C2: the state round-trip must preserve the SIGN of the acceleration. A
+// magnitude round-trip feeds a braking creature back into the slew as though it
+// had been accelerating forward just as hard, which both weakens and
+// non-monotonically perturbs the deceleration ramp.
+TEST(MyopicEntryPoint, BrakingAccelerationKeepsItsSignAcrossFrames)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	// The world is held fixed on purpose: this isolates the state round-trip
+	// from the pursuit dynamics.
+	MyopicInput in = GroundChase(0.f, 5.f, 1.f / 60.f);
+	in.desired_speed_m_s = 0.5f;
+
+	MyopicState st{};
+	const glm::vec3 forward(0.f, 0.f, 1.f);
+
+	float prev_mag = 0.f;
+	for (int i = 0; i < 5; ++i) {
+		MyopicOutput o = ComputeMyopicControl(*out, in, st);
+		const float along = glm::dot(o.linear_acceleration_m_s2, forward);
+
+		EXPECT_LT(along, 0.f) << "frame " << i << ": braking must decelerate";
+		EXPECT_LT(st.prev_accel_m_s2, 0.f)
+			<< "frame " << i << ": the stored history must stay signed";
+		// The ramp must never stutter, and must actually be building while it
+		// still has headroom -- it pins at the stopping-distance bound
+		// (speed_error / max(tau, dt)) once it reaches it, which for the cat
+		// is 135.34 m/s^2 by frame 4.
+		EXPECT_GE(std::fabs(along), prev_mag)
+			<< "frame " << i << ": the braking ramp must not stutter";
+		if (i < 3) {
+			EXPECT_GT(std::fabs(along), prev_mag)
+				<< "frame " << i << ": the braking ramp must build";
+		}
+		prev_mag = std::fabs(along);
+	}
+}
+
+// C4 + the heading-error sign. The controller must close the heading error,
+// not open it: the plan's atan2 argument order gave the angle from the target
+// back to the heading, which steers away at exactly the commanded rate.
+TEST(MyopicEntryPoint, TurnsTowardTheTargetAndClosesTheError)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	for (float bearing : {0.6f, -0.6f}) {
+		MyopicState st{};
+		MyopicInput in = GroundChase(bearing, 3.f, 1.f / 60.f);
+		MyopicOutput o = ComputeMyopicControl(*out, in, st);
+		EXPECT_GT(o.angular_velocity_rad_s.y * bearing, 0.f)
+			<< "turn rate must share the sign of the heading error (bearing "
+			<< bearing << ")";
+
+		const float remaining = SimulateEntryPointHeading(*out, 1.f / 60.f, 3.f, bearing);
+		EXPECT_LT(std::fabs(remaining), 0.1f * std::fabs(bearing))
+			<< "heading error must close, not diverge (bearing " << bearing << ")";
+	}
+}
+
+// C4: a creature pointing straight up has no heading at all. glm::normalize of
+// a zero-length flattened forward is NaN, and NaN in `forward` poisons every
+// output field the caller uses to decide whether to ragdoll.
+TEST(MyopicEntryPoint, VerticalOrientationDoesNotProduceNaN)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	MyopicState st{};
+	MyopicInput in = GroundChase(0.7f, 3.f, 1.f / 60.f);
+	// Nose straight up: forward becomes (0, 1, 0), whose horizontal part is 0.
+	in.orientation  = glm::angleAxis(-glm::half_pi<float>(), glm::vec3(1.f, 0.f, 0.f));
+	in.velocity_m_s = glm::vec3(0.f, 3.f, 0.f);   // and climbing, so no fallback either
+
+	MyopicOutput o = ComputeMyopicControl(*out, in, st);
+
+	EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.x));
+	EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.y));
+	EXPECT_TRUE(std::isfinite(o.linear_acceleration_m_s2.z));
+	EXPECT_TRUE(std::isfinite(o.angular_velocity_rad_s.y));
+	EXPECT_TRUE(std::isfinite(o.stability));
+	EXPECT_EQ(o.angular_velocity_rad_s.y, 0.f) << "no heading, nothing to steer toward";
+	EXPECT_EQ(o.linear_acceleration_m_s2, glm::vec3(0.f))
+		<< "no heading, no direction to push in";
+
+	// Target directly overhead is the same degeneracy on the other side.
+	MyopicState st2{};
+	MyopicInput up = GroundChase(0.f, 3.f, 1.f / 60.f);
+	up.target_position = glm::vec3(0.f, 100.f, 0.f);
+	MyopicOutput o2 = ComputeMyopicControl(*out, up, st2);
+	EXPECT_TRUE(std::isfinite(o2.stability));
+	EXPECT_EQ(o2.angular_velocity_rad_s.y, 0.f);
+}
+
+// C4, the other half: the acceleration is emitted in the HEADING plane, the
+// same plane the turn rate lives in. A pitched-up creature does not get a free
+// climb out of a pure speed command.
+TEST(MyopicEntryPoint, AccelerationStaysInTheHeadingPlane)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	MyopicState st{};
+	MyopicInput in = GroundChase(0.f, 1.f, 1.f / 60.f);
+	in.desired_speed_m_s = 5.f;
+	// Pitched 40 degrees nose-up.
+	in.orientation = glm::angleAxis(-0.7f, glm::vec3(1.f, 0.f, 0.f));
+
+	MyopicOutput o = ComputeMyopicControl(*out, in, st);
+	ASSERT_GT(glm::length(o.linear_acceleration_m_s2), 0.f);
+	EXPECT_EQ(o.linear_acceleration_m_s2.y, 0.f);
+	EXPECT_GT(o.linear_acceleration_m_s2.z, 0.f) << "still pushing along the heading";
+}
+
+// C1: Task 5's bank model is invisible unless the entry point reports it.
+TEST(MyopicEntryPoint, ReportsStrategyAndBankAngle)
+{
+	const Output* ground = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(ground, nullptr);
+	{
+		MyopicState st{};
+		MyopicInput in = GroundChase(0.6f, 3.f, 1.f / 60.f);
+		MyopicOutput o = ComputeMyopicControl(*ground, in, st);
+		EXPECT_EQ(o.strategy, TurnStrategy::GROUND);
+		EXPECT_EQ(o.bank_angle_rad, 0.f);
+	}
+
+	const Output* flyer = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(flyer, nullptr);
+	auto air = ExtractEnvelope(*flyer, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(air.has_value()) << "dragonfly must have an aerial envelope";
+
+	MyopicState st{};
+	// Seeded mid-roll: a legitimate cold start for a caller resuming a banked
+	// flyer. The dragonfly yaws rather than banks, so the target bank is 0 and
+	// the reported angle must be the PARTIALLY rolled-out value -- neither the
+	// seed (no roll-out happened) nor zero (roll-out is not instant).
+	const float seed = 0.5f;
+	st.bank_angle_rad = seed;
+
+	MyopicInput in = GroundChase(0.6f, 8.f, 1.f / 60.f);
+	in.mode        = LocomotionMode::AERIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+
+	MyopicOutput o = ComputeMyopicControl(*flyer, in, st);
+	EXPECT_NE(o.strategy, TurnStrategy::GROUND) << "an aerial envelope yaws or banks";
+	EXPECT_EQ(o.bank_angle_rad, st.bank_angle_rad) << "output must mirror the state";
+	EXPECT_GT(o.bank_angle_rad, 0.f)   << "roll-out is a process, not an instant";
+	EXPECT_LT(o.bank_angle_rad, seed)  << "and it must actually make progress";
+
+	const float roll_step = float(air->aerial->max_roll_rate) / 60.f;
+	EXPECT_NEAR(o.bank_angle_rad, seed - roll_step, 1e-5f);
+
+	// Landing readout is populated in aerial mode and only there.
+	EXPECT_NEAR(o.touchdown_speed_m_s, float(air->min_speed), 1e-5f);
+}
+
+// The entry point now owns the state round-trip, so dt-independence has to be
+// re-verified THROUGH it and not only through Steer.
+TEST(MyopicFramerate, EntryPointTrajectoryConvergesAcrossTimesteps)
+{
+	const Output* out = Analyze("cat.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+
+	const float bearing = 0.8f;
+	const float t_mid   = 0.25f; // mid-slew: the laws are still separating here
+
+	const float e30  = SimulateEntryPointHeading(*out, 1.f / 30.f,  t_mid, bearing);
+	const float e60  = SimulateEntryPointHeading(*out, 1.f / 60.f,  t_mid, bearing);
+	const float e120 = SimulateEntryPointHeading(*out, 1.f / 120.f, t_mid, bearing);
+
+	EXPECT_NEAR(e30,  e60,  0.05f * bearing);
+	EXPECT_NEAR(e60,  e120, 0.05f * bearing);
+
+	// And the endpoint agrees too.
+	const float f30  = SimulateEntryPointHeading(*out, 1.f / 30.f,  3.f, bearing);
+	const float f120 = SimulateEntryPointHeading(*out, 1.f / 120.f, 3.f, bearing);
+	EXPECT_NEAR(f30, f120, 0.02f * bearing);
 }
