@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <deque>
@@ -202,6 +203,18 @@ Envelope TestEnvelope()
 	return e;
 }
 
+// Same shape as TestEnvelope but with a fast slew (tau well under a 16 Hz
+// frame). Exercises the dt > tau_linear regime, where the stopping-angle
+// bound alone (error / tau_linear) is not the tighter constraint -- added in
+// review round 2 after that regime was found to overshoot (up to 83%, with
+// repeated sign flips) under the round-1 bound.
+Envelope FastTauEnvelope()
+{
+	Envelope e = TestEnvelope();
+	e.tau_linear = time_s{0.025f};
+	return e;
+}
+
 // Integrate a pure heading-tracking maneuver and return the final heading error.
 float SimulateTurn(float dt, float total_time_s, float initial_error_rad)
 {
@@ -299,6 +312,39 @@ TEST(MyopicNoOscillation, HeadingErrorIsMonotone)
 	const float dt = 1.f / 60.f;
 
 	for (int i = 0; i < 600; ++i) { // 10 seconds
+		SteerCommand cmd;
+		cmd.angle_error_rad   = error;
+		cmd.current_speed_m_s = 5.f;
+		cmd.desired_speed_m_s = 5.f;
+		cmd.dt_s              = dt;
+
+		SteerResult r = Steer(env, state, cmd);
+		error -= r.turn_rate_rad_s * dt;
+
+		ASSERT_GE(error, -0.01f) << "overshot into negative error at step " << i;
+		ASSERT_LE(error, prev_error + 1e-4f) << "error grew at step " << i;
+		prev_error = error;
+	}
+	EXPECT_NEAR(error, 0.f, 0.02f) << "did not converge";
+}
+
+// Added in review round 2: the dt > tau_linear regime. HeadingErrorIsMonotone
+// above only exercises tau=0.25 at dt=1/60 (dt < tau), where the
+// stopping-angle bound (error / tau_linear) alone is the tighter, correct
+// constraint. A creature with a fast slew relative to its frame time --
+// tau_linear = optimal_speed / max_acceleration can easily land under 16 ms
+// -- was found to overshoot under that bound alone: up to 83% past zero,
+// with repeated sign flips, at tau=0.025 driven at 16 Hz. This test pins the
+// same monotonicity and no-sign-crossing properties in that regime.
+TEST(MyopicNoOscillation, HeadingErrorIsMonotoneWhenDtExceedsTau)
+{
+	Envelope env = FastTauEnvelope(); // tau_linear = 0.025s
+	SteerState state{};
+	float error = 1.5f;
+	float prev_error = error;
+	const float dt = 1.f / 16.f; // dt (0.0625s) > tau_linear (0.025s)
+
+	for (int i = 0; i < 160; ++i) { // 10 seconds
 		SteerCommand cmd;
 		cmd.angle_error_rad   = error;
 		cmd.current_speed_m_s = 5.f;
