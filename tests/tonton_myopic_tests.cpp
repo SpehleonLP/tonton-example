@@ -2381,7 +2381,8 @@ struct LaunchRunResult {
 // commands. Heading is held: while the launch precondition is unmet the
 // controller suppresses steering anyway, so the run is a straight line.
 LaunchRunResult SimulateLaunchRun(const Output& o, int gait, int frames = 3000,
-                                  glm::vec3 wind = glm::vec3(0.f))
+                                  glm::vec3 wind = glm::vec3(0.f),
+                                  float desired_speed_m_s = -1.f)
 {
 	const float dt = 1.f / 60.f;
 	MyopicState st{};
@@ -2394,6 +2395,7 @@ LaunchRunResult SimulateLaunchRun(const Output& o, int gait, int frames = 3000,
 	in.target_position     = TargetAtBearing(0.6f);
 	in.medium_velocity_m_s = wind;
 	in.velocity_m_s        = glm::vec3(0.f);
+	in.desired_speed_m_s   = desired_speed_m_s;
 
 	MyopicOutput out;
 	for (int i = 0; i < frames; ++i) {
@@ -2768,4 +2770,453 @@ TEST(MyopicFramerate, StabilityIsFramerateIndependent)
 				<< c.file << " at " << rates[k] << " Hz";
 		}
 	}
+}
+
+// ===========================================================================
+// Fix round 2. Every test below exists because a named perturbation of the
+// shipped code left the previous 79 green.
+// ===========================================================================
+
+// --- H1: the launch run's wind conversion ----------------------------------
+//
+// `required_ground = required_airspeed + dot(wind, forward)` is one line, and
+// both flipping its sign to `-=` and deleting it outright left the whole suite
+// green. LaunchRunReachesFullReadiness runs in still air, where the term is
+// exactly 0; LaunchReadinessStaysAnAirspeedEvenFromTheGround is a one-frame
+// check that never reaches the speed floor at all.
+//
+// Closed loop, wind along the heading (+Z, the direction the run holds). The
+// conversion is pinned from BOTH sides at once: the converged GROUND speed must
+// be R -/+ 3 while the achieved AIRSPEED is R either way. The sign flip breaks
+// the ground speed and the airspeed together; the deletion leaves the ground
+// speed at R and pushes the airspeed to R -/+ 3.
+TEST(MyopicLaunch, WindAlongTheRunwayShiftsGroundSpeedNotAirspeed)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
+
+	const float R = float(out->aerial->min_flight_speed_m_s);
+	const float w = 3.f;
+	ASSERT_GT(R, w) << "the headwind must not swallow the whole requirement here";
+
+	struct Case { const char* name; float wind_z; float expected_ground; };
+	const Case cases[] = {
+		{"headwind", -w, R - w},   // dot(wind, +Z) = -3 -> a shorter run
+		{"tailwind", +w, R + w},   // dot(wind, +Z) = +3 -> a longer one
+		{"still",    0.f, R},
+	};
+
+	for (auto const& c : cases) {
+		LaunchRunResult r = SimulateLaunchRun(*out, /*gait=*/2, /*frames=*/3000,
+		                                      glm::vec3(0.f, 0.f, c.wind_z));
+		std::cerr << "[launch wind] " << c.name << " ground=" << r.ground_speed
+		          << " airspeed=" << r.airspeed << " readiness=" << r.readiness
+		          << " (required airspeed " << r.required_airspeed << ")\n";
+
+		EXPECT_NEAR(r.ground_speed, c.expected_ground, 1e-2f * c.expected_ground)
+			<< c.name << ": the run converged on the wrong GROUND speed";
+		EXPECT_NEAR(r.airspeed, R, 1e-2f * R)
+			<< c.name << ": the wing must see the same airspeed in every wind";
+		EXPECT_NEAR(r.readiness, 1.f, 1e-3f) << c.name;
+	}
+}
+
+// The floor-at-0 branch, which nothing reached: a headwind stronger than the
+// whole requirement means the creature is already at flight speed STANDING
+// STILL. `required` goes negative, std::max clamps it to 0, and the launch then
+// asks for nothing at all -- so the speed channel goes back to being the
+// caller's, here the gait's own top speed.
+TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	const float R = float(out->aerial->min_flight_speed_m_s);
+
+	const float wind = R + 2.f;   // blowing straight down the runway at us
+	auto env = ExtractEnvelope(*out, LocomotionMode::TERRESTRIAL, 2, 9.81f);
+	ASSERT_TRUE(env.has_value());
+	const float gait_top = float(env->max_speed);
+	ASSERT_LT(gait_top, R) << "this gait must not cover flight speed on its own";
+
+	LaunchRunResult r = SimulateLaunchRun(*out, /*gait=*/2, /*frames=*/3000,
+	                                      glm::vec3(0.f, 0.f, -wind));
+	std::cerr << "[launch floor 0] wind=" << wind << " ground=" << r.ground_speed
+	          << " gait_top=" << gait_top << " airspeed=" << r.airspeed
+	          << " readiness=" << r.readiness << "\n";
+
+	EXPECT_NEAR(r.ground_speed, gait_top, 1e-2f * gait_top)
+		<< "with the requirement already met, the speed channel belongs to the caller";
+	EXPECT_NEAR(r.readiness, 1.f, 1e-4f);
+	EXPECT_GT(r.airspeed, R) << "standing in this wind is already flying";
+}
+
+// --- H5: the requirement is a FLOOR, not a replacement ---------------------
+//
+// Turning `std::max(floor, wish)` into a bare `floor` left 79/79 green: every
+// launch fixture in the suite either leaves desired_speed_m_s at -1 or asks for
+// less than flight speed, so the two forms agreed everywhere. A caller that
+// wants MARGIN over the stall -- or is chasing something down the runway -- is
+// the case that distinguishes them.
+TEST(MyopicLaunch, TheLaunchRequirementIsAFloorNotACeiling)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	const float R = float(out->aerial->min_flight_speed_m_s);
+
+	const float wanted = 2.f * R;
+	LaunchRunResult fast = SimulateLaunchRun(*out, 2, 3000, glm::vec3(0.f), wanted);
+	std::cerr << "[launch floor] asked " << wanted << " required " << R
+	          << " -> ground " << fast.ground_speed << "\n";
+	EXPECT_NEAR(fast.ground_speed, wanted, 1e-2f * wanted)
+		<< "a caller asking for margin over the stall had its number thrown away";
+
+	// ...and the floor still binds in the other direction: asking for less than
+	// flight speed does NOT get you a takeoff run that stalls short.
+	LaunchRunResult slow = SimulateLaunchRun(*out, 2, 3000, glm::vec3(0.f), 0.25f * R);
+	EXPECT_NEAR(slow.ground_speed, R, 1e-2f * R)
+		<< "the launch requirement stopped being a floor";
+	EXPECT_NEAR(slow.readiness, 1.f, 1e-3f);
+}
+
+// --- H2: the LaunchFacts wiring -------------------------------------------
+//
+// G3 made the DISPATCH testable and in doing so created an untested seam
+// between it and its only caller. Every MyopicEntryPoint test that compared
+// ComputeMyopicControl's output against PlanLaunch(*out, in, v) was comparing
+// two values that had both been through this same adapter, so a corrupted field
+// cancelled out on both sides. Measured: clearing can_use_water_taxi, swapping
+// the required and available jump velocities, and hardcoding gravity to 9.81
+// each left 79/79 green.
+//
+// The oracle has to be the test body reading `Output` itself.
+namespace {
+
+// Deliberately spelled out rather than factored: this IS the assertion.
+LaunchFacts ExpectedFacts(const Output& o, const MyopicInput& in, float airspeed)
+{
+	const Analysis_Aerial&           a = *o.aerial;
+	const Analysis_TakeoffAnalysis&  t = a.takeoff;
+
+	LaunchFacts f;
+	f.mode                        = t.mode;
+	f.required_airspeed_m_s       = float(a.min_flight_speed_m_s);
+	f.airspeed_m_s                = airspeed;
+	f.gravity_m_s2                = in.gravity_m_s2;
+	f.required_jump_velocity_m_s  = float(t.required_jump_velocity_m_s);
+	f.has_jump_analysis           = o.jumping.has_value();
+	f.available_jump_velocity_m_s = o.jumping.has_value()
+		? float(o.jumping->takeoff_velocity_m_s) : 0.f;
+	f.substrate                   = in.substrate;
+	f.can_use_water_taxi          = t.can_use_water_taxi;
+	f.wing_loading_ok             = t.constraints.wing_loading_ok;
+	f.power_loading_ok            = t.constraints.power_loading_ok;
+	f.aspect_ratio_ok             = t.constraints.aspect_ratio_ok;
+	f.leg_strength_ok             = t.constraints.leg_strength_ok;
+	return f;
+}
+
+void ExpectSamePlan(const LaunchPlan& a, const LaunchPlan& b, const std::string& where)
+{
+	EXPECT_EQ(a.feasible,                   b.feasible)                   << where;
+	EXPECT_FLOAT_EQ(a.readiness,            b.readiness)                  << where;
+	EXPECT_EQ(a.blocking_reason,            b.blocking_reason)            << where;
+	EXPECT_FLOAT_EQ(a.required_airspeed_m_s, b.required_airspeed_m_s)     << where;
+	EXPECT_FLOAT_EQ(a.required_drop_m,      b.required_drop_m)            << where;
+	EXPECT_FLOAT_EQ(a.required_jump_velocity_m_s,
+	                b.required_jump_velocity_m_s)                         << where;
+	EXPECT_EQ(a.jump_direction,             b.jump_direction)             << where;
+	EXPECT_EQ(a.jump_feasible,              b.jump_feasible)              << where;
+	EXPECT_EQ(a.accelerate_along_heading,   b.accelerate_along_heading)   << where;
+}
+
+} // namespace
+
+TEST(MyopicLaunchDispatch, TheAdapterWiresEveryFactFromTheAnalysis)
+{
+	struct Case { const char* file; Env env; };
+	const Case models[] = {
+		{"batto.glb", Env::Air}, {"dragonfly.glb", Env::Air},
+		{"penguin.glb", Env::Ocean}, {"penguin.glb", Env::Air},
+	};
+	const Substrate substrates[] = {
+		Substrate::GROUND, Substrate::WATER, Substrate::PERCH, Substrate::CLIFF_EDGE };
+	// 3.71 is Mars. A hardcoded 9.81 in the adapter cannot hide behind it, and
+	// 0 exercises the free-fall guard through the wiring rather than around it.
+	const float gravities[] = {9.81f, 3.71f, 0.f};
+	const float airspeeds[] = {0.f, 3.f, 100.f};
+
+	int taxi_true = 0, jump_sections = 0, quantified_jumps = 0;
+
+	for (auto const& m : models) {
+		const Output* o = Analyze(m.file, m.env);
+		ASSERT_NE(o, nullptr) << m.file;
+		ASSERT_TRUE(o->aerial.has_value()) << m.file;
+
+		if (o->aerial->takeoff.can_use_water_taxi) ++taxi_true;
+		if (o->jumping.has_value()) {
+			++jump_sections;
+			if (float(o->aerial->takeoff.required_jump_velocity_m_s) > 0.f)
+				++quantified_jumps;
+		}
+
+		for (Substrate s : substrates)
+		for (float g : gravities)
+		for (float v : airspeeds) {
+			MyopicInput in;
+			in.mode         = LocomotionMode::TERRESTRIAL;
+			in.target_mode  = LocomotionMode::AERIAL;
+			in.substrate    = s;
+			in.gravity_m_s2 = g;
+
+			const std::string where = std::string(m.file)
+				+ " substrate=" + std::to_string(int(s))
+				+ " g=" + std::to_string(g) + " v=" + std::to_string(v);
+
+			std::optional<LaunchFacts> got = MakeLaunchFacts(*o, in, v);
+			ASSERT_TRUE(got.has_value()) << where;
+			const LaunchFacts want = ExpectedFacts(*o, in, v);
+
+			// Field by field against a source that does not share the adapter.
+			EXPECT_EQ(got->mode, want.mode) << where;
+			EXPECT_FLOAT_EQ(got->required_airspeed_m_s, want.required_airspeed_m_s) << where;
+			EXPECT_FLOAT_EQ(got->airspeed_m_s, want.airspeed_m_s) << where;
+			EXPECT_FLOAT_EQ(got->gravity_m_s2, want.gravity_m_s2) << where
+				<< " -- gravity is a world fact the caller owns; do not hardcode 9.81";
+			EXPECT_FLOAT_EQ(got->required_jump_velocity_m_s,
+			                want.required_jump_velocity_m_s) << where;
+			EXPECT_FLOAT_EQ(got->available_jump_velocity_m_s,
+			                want.available_jump_velocity_m_s) << where;
+			EXPECT_EQ(got->has_jump_analysis, want.has_jump_analysis) << where;
+			EXPECT_EQ(got->substrate, want.substrate) << where;
+			EXPECT_EQ(got->can_use_water_taxi, want.can_use_water_taxi) << where;
+			EXPECT_EQ(got->wing_loading_ok,  want.wing_loading_ok)  << where;
+			EXPECT_EQ(got->power_loading_ok, want.power_loading_ok) << where;
+			EXPECT_EQ(got->aspect_ratio_ok,  want.aspect_ratio_ok)  << where;
+			EXPECT_EQ(got->leg_strength_ok,  want.leg_strength_ok)  << where;
+
+			// ...and the whole plan, so a field the dispatch reads but the list
+			// above forgets is still caught.
+			ExpectSamePlan(PlanLaunch(want), PlanLaunch(*o, in, v), where);
+		}
+	}
+
+	// The sweep only pins a boolean if some model actually sets it: if every
+	// sample reported false, `can_use_water_taxi = false` would be invisible
+	// here too. Same for the two jump fields, whose SWAP is only observable
+	// where they differ.
+	EXPECT_GT(taxi_true, 0)
+		<< "no sample reports can_use_water_taxi; this sweep cannot pin that field";
+	EXPECT_GT(jump_sections, 0) << "no sample has a jumping section";
+
+	// The jump-velocity swap, pinned directly rather than through the sweep:
+	// required and available must differ somewhere for the swap to show, and the
+	// dispatch only compares them in the JUMP_LAUNCH arm, which no sample enters.
+	int distinguishing = 0;
+	for (auto const& m : models) {
+		const Output* o = Analyze(m.file, m.env);
+		if (!o || !o->jumping.has_value()) continue;
+		const float req = float(o->aerial->takeoff.required_jump_velocity_m_s);
+		const float ava = float(o->jumping->takeoff_velocity_m_s);
+		std::cerr << "[jump wiring] " << m.file << " required=" << req
+		          << " available=" << ava << "\n";
+		if (std::fabs(req - ava) > 1e-6f) ++distinguishing;
+	}
+	EXPECT_GT(distinguishing, 0)
+		<< "required and available jump velocity are equal in every sample, so a "
+		   "swap between them would be unobservable";
+	(void)quantified_jumps;
+}
+
+// --- H3: SpeedFrameOf's AERIAL arm ----------------------------------------
+//
+// Moving AERIAL from MEDIUM to GROUND *alone* left 79/79 green -- only swapping
+// it with TERRESTRIAL bit, and then only through the two TERRESTRIAL tests. No
+// test flew a creature in a wind at all. batto has no aerial envelope (negative
+// power surplus; see MyopicEnvelope.AerialPresenceFollowsPowerSurplus and the
+// documented Species.Bat clade red), so this uses the dragonfly.
+TEST(MyopicFrame, AFlyersEnvelopeIsEvaluatedAgainstTheAirNotTheGround)
+{
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	auto env = ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(env.has_value()) << "this test needs a creature that actually flies";
+	const float stall = float(env->min_speed);
+	ASSERT_GT(stall, 0.f);
+
+	// Fly along +Z at `ground` with the air itself moving at `wind` along +Z.
+	auto settle = [&](float ground, float wind) {
+		MyopicState st{};
+		MyopicOutput o;
+		for (int i = 0; i < 600; ++i) {
+			MyopicInput in;
+			in.mode                = LocomotionMode::AERIAL;
+			in.target_mode         = LocomotionMode::AERIAL;
+			in.orientation         = glm::quat(1.f, 0.f, 0.f, 0.f); // forward +Z
+			in.target_position     = TargetAtBearing(0.8f);
+			in.velocity_m_s        = glm::vec3(0.f, 0.f, ground);
+			in.medium_velocity_m_s = glm::vec3(0.f, 0.f, wind);
+			in.desired_speed_m_s   = ground - wind;   // hold this airspeed
+			in.dt_s                = 1.f / 60.f;
+			o = ComputeMyopicControl(*out, in, st);
+		}
+		return o;
+	};
+
+	// Same AIRSPEED, very different ground speeds. Under the frame rule these
+	// are the same flight condition and must read identically.
+	MyopicOutput calm  = settle(2.0f * stall, 0.f);
+	MyopicOutput blown = settle(4.0f * stall, 2.0f * stall);
+
+	std::cerr << "[frame aerial] stall=" << stall
+	          << " | airspeed 2*stall, no wind: turn=" << calm.angular_velocity_rad_s.y
+	          << " stability=" << calm.stability << " bank=" << calm.bank_angle_rad
+	          << " | same airspeed, 2*stall tailwind: turn=" << blown.angular_velocity_rad_s.y
+	          << " stability=" << blown.stability << " bank=" << blown.bank_angle_rad << "\n";
+
+	EXPECT_NEAR(blown.angular_velocity_rad_s.y, calm.angular_velocity_rad_s.y, 1e-5f)
+		<< "the same airspeed is the same flight condition, whatever the ground does";
+	EXPECT_NEAR(blown.stability,      calm.stability,      1e-4f);
+	EXPECT_NEAR(blown.speed_headroom, calm.speed_headroom, 1e-4f);
+	EXPECT_NEAR(blown.turn_headroom,  calm.turn_headroom,  1e-4f);
+	EXPECT_NEAR(blown.bank_angle_rad, calm.bank_angle_rad, 1e-5f);
+
+	// And the other direction, so the equalities above are not two cases
+	// collapsing onto the same wrong answer: the SAME ground speed with a
+	// tailwind that puts the wing below its stall speed is a different, worse
+	// flight condition. Under a ground-frame reading it would be identical to
+	// `calm`.
+	MyopicOutput stalled = settle(2.0f * stall, 1.5f * stall); // airspeed 0.5*stall
+	std::cerr << "[frame aerial] below stall: stability=" << stalled.stability
+	          << " speed_headroom=" << stalled.speed_headroom << "\n";
+	EXPECT_LT(stalled.stability, calm.stability - 1e-3f)
+		<< "a tailwind that erases the airspeed must be visible to a WING";
+	EXPECT_LT(stalled.stability, 0.f) << "below stall is not a comfortable place to be";
+}
+
+// --- H4: the launch readouts must reach a caller ---------------------------
+//
+// required_drop_m was derived correctly in LaunchPlan and copied nowhere:
+// MyopicOutput had no drop field, so a CLIFF_LAUNCH creature's caller learned
+// only NEEDS_ELEVATION and could never find out how much.
+TEST(MyopicEntryPoint, ForwardsTheRequiredDrop)
+{
+	for (const char* file : {"batto.glb", "dragonfly.glb"}) {
+		const Output* out = Analyze(file, Env::Air);
+		ASSERT_NE(out, nullptr) << file;
+		ASSERT_TRUE(out->aerial.has_value()) << file;
+		const float v_stall = float(out->aerial->min_flight_speed_m_s);
+
+		for (float g : {9.81f, 3.71f}) {
+			MyopicState st{};
+			MyopicInput in;
+			in.mode         = LocomotionMode::TERRESTRIAL;
+			in.target_mode  = LocomotionMode::AERIAL;
+			in.substrate    = Substrate::CLIFF_EDGE;
+			in.gravity_m_s2 = g;
+			in.dt_s         = 1.f / 60.f;
+
+			MyopicOutput o = ComputeMyopicControl(*out, in, st);
+			const float expected = v_stall * v_stall / (2.f * g);
+			EXPECT_NEAR(o.required_drop_m, expected, 1e-3f * expected)
+				<< file << " at g = " << g;
+			EXPECT_GT(o.required_drop_m, 0.f) << file;
+			std::cerr << "[drop] " << file << " g=" << g << " v_stall=" << v_stall
+			          << " -> required_drop=" << o.required_drop_m << " m\n";
+		}
+
+		// Not transitioning to AERIAL: no launch plan, no drop.
+		MyopicState st2{};
+		MyopicInput ground;
+		ground.mode        = LocomotionMode::TERRESTRIAL;
+		ground.target_mode = LocomotionMode::TERRESTRIAL;
+		ground.dt_s        = 1.f / 60.f;
+		EXPECT_EQ(ComputeMyopicControl(*out, ground, st2).required_drop_m, 0.f) << file;
+	}
+}
+
+// `feasible` is NOT redundant with `blocking_reason == NONE`. A RUNNING_TAKEOFF
+// creature reports NEEDS_RUNWAY_SPEED in two completely different situations,
+// and only `launch_feasible` separates them: accelerating down a real runway
+// (keep going) versus standing somewhere it can never take off from (give up).
+TEST(MyopicEntryPoint, LaunchFeasibilityIsNotTheSameFactAsTheBlockingReason)
+{
+	const Output* out = Analyze("batto.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
+	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
+	const float v_min = float(out->aerial->min_flight_speed_m_s);
+
+	MyopicInput base;
+	base.mode        = LocomotionMode::TERRESTRIAL;
+	base.target_mode = LocomotionMode::AERIAL;
+	base.dt_s        = 1.f / 60.f;
+
+	MyopicState a{};
+	MyopicInput running = base;
+	running.substrate    = Substrate::GROUND;
+	running.velocity_m_s = glm::vec3(0.f, 0.f, 0.5f * v_min);
+	MyopicOutput mid = ComputeMyopicControl(*out, running, a);
+
+	MyopicState b{};
+	MyopicInput perched = base;
+	perched.substrate = Substrate::PERCH;
+	MyopicOutput stuck = ComputeMyopicControl(*out, perched, b);
+
+	// Identical reason, opposite verdicts. This is the whole point.
+	ASSERT_EQ(mid.blocking_reason,   BlockingReason::NEEDS_RUNWAY_SPEED);
+	ASSERT_EQ(stuck.blocking_reason, BlockingReason::NEEDS_RUNWAY_SPEED);
+	EXPECT_TRUE(mid.launch_feasible)
+		<< "a run that is halfway to flight speed is going to work";
+	EXPECT_FALSE(stuck.launch_feasible)
+		<< "no amount of patience gets a running takeoff off a perch";
+
+	// And it is false by default when no launch is being planned at all.
+	MyopicState c{};
+	MyopicInput ground = base;
+	ground.target_mode = LocomotionMode::TERRESTRIAL;
+	EXPECT_FALSE(ComputeMyopicControl(*out, ground, c).launch_feasible);
+}
+
+// --- H6: can_use_water_taxi means a RUNNING takeoff, and nothing else ------
+//
+// The flag is set from `output.aquatic.has_value()` and documented as "run on
+// water surface (pelicans)". Using it to clear a standing LEG THRUST off open
+// water borrowed evidence from a different behaviour: a pelican pattering
+// across a lake with its wings carrying the weight says nothing about whether
+// its legs could launch it from one. Nothing in the analysis layer speaks to
+// leg thrust against a non-solid substrate, so JUMP_LAUNCH refuses water flat.
+TEST(MyopicLaunchDispatch, WaterTaxiDoesNotBuyALegThrust)
+{
+	LaunchFacts f = BaseFacts(TakeoffMode::JUMP_LAUNCH);
+	f.has_jump_analysis           = true;
+	f.required_jump_velocity_m_s  = 3.f;
+	f.available_jump_velocity_m_s = 4.f;   // legs are plenty strong
+	f.substrate                   = Substrate::WATER;
+	f.can_use_water_taxi          = true;  // ...and it taxis
+
+	LaunchPlan p = PlanLaunch(f);
+	EXPECT_FALSE(p.feasible)
+		<< "taxiing is a running takeoff; it is not evidence about leg thrust";
+	EXPECT_EQ(p.readiness, 0.f);
+	EXPECT_EQ(p.blocking_reason, BlockingReason::NEEDS_SOLID_SUBSTRATE);
+
+	// The same flag on the same substrate DOES clear the two behaviours it
+	// actually describes -- a run across the surface, and a standing wingbeat,
+	// which asks the water only to hold the creature up.
+	LaunchFacts run = BaseFacts(TakeoffMode::RUNNING_TAKEOFF);
+	run.substrate          = Substrate::WATER;
+	run.can_use_water_taxi = true;
+	EXPECT_TRUE(PlanLaunch(run).feasible) << "a pelican's runway is the lake";
+
+	LaunchFacts hover = BaseFacts(TakeoffMode::VERTICAL_LAUNCH);
+	hover.substrate          = Substrate::WATER;
+	hover.can_use_water_taxi = true;
+	EXPECT_TRUE(PlanLaunch(hover).feasible) << "buoyancy holds a floating bird up";
+
+	// ...and solid ground still accepts the jump, so the refusal above is about
+	// the water and not about the arm being gutted.
+	f.substrate = Substrate::GROUND;
+	EXPECT_TRUE(PlanLaunch(f).feasible);
 }
