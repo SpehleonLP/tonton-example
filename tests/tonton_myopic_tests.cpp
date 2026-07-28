@@ -139,6 +139,30 @@ const Output* Analyze(const std::string& filename, Env env)
 }
 
 // ---------------------------------------------------------------------------
+// THE reference flyer for tests about how a launch PROCEEDS.
+//
+// Not batto.glb. The bat has an Analysis_Aerial section but no aerial
+// `Envelope`: its mechanical surplus is negative (152.6 W available against
+// 280.1 W required), which is honest propagation of the known Species.Bat clade
+// defect. Since the launch planner was reconciled with ExtractEnvelope, every
+// launch batto plans is therefore -- correctly -- refused outright with
+// BlockingReason::CANNOT_SUSTAIN_FLIGHT, so it can no longer serve as the
+// fixture for "the run completes", "readiness rises with airspeed", "a headwind
+// shortens the runway" and the rest: there is no run to observe.
+//
+// That refusal is itself pinned, by
+// MyopicLaunch.ALaunchIsRefusedWhenFlightCannotBeSustained and
+// MyopicLaunch.ThePromiseAndTheDeliveryAgree, which is where batto now earns its
+// keep. dragonfly.glb is the one sample flyer that both classifies
+// RUNNING_TAKEOFF and has a usable aerial envelope.
+//
+// SELF-REPEALING: if the clade defect is fixed upstream and batto gains an
+// aerial envelope, ThePromiseAndTheDeliveryAgree keeps passing (it asserts
+// agreement, not refusal) and these tests can be pointed back at the bat.
+// ---------------------------------------------------------------------------
+constexpr const char* kLaunchFlyer = "dragonfly.glb";
+
+// ---------------------------------------------------------------------------
 // A freshly-analysed Output that the CALLER owns exclusively -- not the shared
 // cache above. Two tests need this:
 //   - driving a non-default Input (the mana axis), which the cache's key does
@@ -228,6 +252,11 @@ Envelope TestEnvelope()
 	e.max_lateral_accel = acceleration_m_s2{8.f};
 	e.min_turn_radius   = length_m{2.f};
 	e.tau_linear        = time_s{0.25f};
+	// Shaped like a TERRESTRIAL envelope (no aerial authority, zero speed floor,
+	// a stated turning radius), so it carries the one thing that is terrestrial-
+	// only: a gait concept. suggest_gait_change is scoped to it.
+	e.has_gaits         = true;
+	e.cruise_speed      = velocity_m_s{6.f};
 	return e;
 }
 
@@ -1712,7 +1741,7 @@ TEST(MyopicLaunch, NonFlyerReportsNoAerialAnalysis)
 // reach saturation, not merely fail to fall.
 TEST(MyopicLaunch, ReadinessIsMonotoneAndActuallyRisesWithAirspeed)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	ASSERT_TRUE(out->aerial.has_value());
 	ASSERT_EQ(out->aerial->takeoff.mode,
@@ -1744,7 +1773,7 @@ TEST(MyopicLaunch, ReadinessIsMonotoneAndActuallyRisesWithAirspeed)
 
 TEST(MyopicLaunch, RunningTakeoffNeedsARunwaySubstrate)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
 
@@ -1793,7 +1822,7 @@ TEST(MyopicLaunch, ImpossibleTakeoffReportsItsFirstFailedConstraint)
 // module, so it gets its own test.
 TEST(MyopicAirspeed, HeadwindMakesLaunchEasierThanTailwind)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 
 	MyopicState st_head{}, st_tail{};
@@ -1826,7 +1855,7 @@ TEST(MyopicAirspeed, HeadwindMakesLaunchEasierThanTailwind)
 
 TEST(MyopicAirspeed, StillAirReadinessSitsBetweenHeadAndTailwind)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -1834,11 +1863,16 @@ TEST(MyopicAirspeed, StillAirReadinessSitsBetweenHeadAndTailwind)
 	in.mode        = LocomotionMode::TERRESTRIAL;
 	in.target_mode = LocomotionMode::AERIAL;
 	in.substrate   = Substrate::GROUND;
-	in.velocity_m_s = glm::vec3(5.f, 0.f, 0.f);
+	// A FRACTION of the requirement, so the reading lands strictly inside the
+	// [0, 1] clamp and the arithmetic is pinned rather than saturated. (A
+	// hardcoded 5 m/s did that against batto's 7.867 m/s stall; against the
+	// dragonfly's 2.631 it just reads 1.)
+	const float v = 0.5f * v_min;
+	in.velocity_m_s = glm::vec3(v, 0.f, 0.f);
 
 	MyopicState st{};
 	MyopicOutput o = ComputeMyopicControl(*out, in, st);
-	EXPECT_NEAR(o.transition_readiness, 5.f / v_min, 1e-4f);
+	EXPECT_NEAR(o.transition_readiness, v / v_min, 1e-4f);
 }
 
 // --- The entry point -------------------------------------------------------
@@ -2177,6 +2211,12 @@ LaunchFacts BaseFacts(TakeoffMode m)
 	f.airspeed_m_s           = 0.f;
 	f.gravity_m_s2           = 9.81f;
 	f.substrate              = Substrate::GROUND;
+	// The destination exists. Every arm below asks HOW this creature gets
+	// airborne, which is only worth asking of one that can stay there; the
+	// `false` case is its own test
+	// (ALaunchIsRefusedWhenTheAerialModeCannotBeSustained). The field defaults to
+	// false precisely so a fixture has to state it.
+	f.can_sustain_flight = true;
 	f.wing_loading_ok  = true;
 	f.power_loading_ok = true;
 	f.aspect_ratio_ok  = true;
@@ -2455,9 +2495,13 @@ LaunchRunResult SimulateLaunchRun(const Output& o, int gait, int frames = 3000,
 // RUNNING_TAKEOFF is the mode both sample flyers classify as, so that was the
 // entire launch feature. Command the airspeed the launch actually requires and
 // the run completes.
+//
+// batto.glb was the second model here. It is now refused before the run starts
+// (no aerial envelope -> CANNOT_SUSTAIN_FLIGHT), which is the point of
+// ThePromiseAndTheDeliveryAgree below; see kLaunchFlyer.
 TEST(MyopicLaunch, LaunchRunReachesFullReadiness)
 {
-	for (const char* file : {"batto.glb", "dragonfly.glb"}) {
+	for (const char* file : {kLaunchFlyer}) {
 		const Output* out = Analyze(file, Env::Air);
 		ASSERT_NE(out, nullptr) << file;
 		ASSERT_TRUE(out->aerial.has_value()) << file;
@@ -2486,7 +2530,7 @@ TEST(MyopicLaunch, LaunchRunReachesFullReadiness)
 // unreachable at this gait.
 TEST(MyopicLaunch, AGaitThatCannotReachFlightSpeedSaysSo)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 
 	const float required = float(out->aerial->min_flight_speed_m_s);
@@ -2515,7 +2559,7 @@ TEST(MyopicLaunch, AGaitThatCannotReachFlightSpeedSaysSo)
 // at flight speed flew straight past its target.
 TEST(MyopicLaunch, SteeringResumesOnceTheLaunchPreconditionIsMet)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -2640,7 +2684,7 @@ TEST(MyopicFrame, TailwindDoesNotEraseARunnersGripBudget)
 // still move readiness.
 TEST(MyopicFrame, LaunchReadinessStaysAnAirspeedEvenFromTheGround)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -2650,18 +2694,23 @@ TEST(MyopicFrame, LaunchReadinessStaysAnAirspeedEvenFromTheGround)
 	in.substrate    = Substrate::GROUND;
 	in.dt_s         = 1.f / 60.f;
 	// Same ground speed both times. Both airspeeds are chosen to land strictly
-	// inside the [0, 1] clamp so the arithmetic is pinned, not just the order.
-	in.velocity_m_s = glm::vec3(0.f, 0.f, 3.f);
+	// inside the [0, 1] clamp so the arithmetic is pinned, not just the order --
+	// hence fractions of the requirement rather than absolute speeds, which
+	// saturated once this test moved from batto's 7.867 m/s stall to the
+	// dragonfly's 2.631.
+	const float v_ground = 0.5f * v_min;
+	const float v_wind   = 0.2f * v_min;
+	in.velocity_m_s = glm::vec3(0.f, 0.f, v_ground);
 
 	MyopicState a{}, b{};
-	MyopicInput head = in; head.medium_velocity_m_s = glm::vec3(0.f, 0.f, -2.f);
-	MyopicInput tail = in; tail.medium_velocity_m_s = glm::vec3(0.f, 0.f,  2.f);
+	MyopicInput head = in; head.medium_velocity_m_s = glm::vec3(0.f, 0.f, -v_wind);
+	MyopicInput tail = in; tail.medium_velocity_m_s = glm::vec3(0.f, 0.f,  v_wind);
 
 	MyopicOutput h = ComputeMyopicControl(*out, head, a);
 	MyopicOutput t = ComputeMyopicControl(*out, tail, b);
 
-	EXPECT_NEAR(h.transition_readiness, 5.f / v_min, 1e-4f);
-	EXPECT_NEAR(t.transition_readiness, 1.f / v_min, 1e-4f);
+	EXPECT_NEAR(h.transition_readiness, (v_ground + v_wind) / v_min, 1e-4f);
+	EXPECT_NEAR(t.transition_readiness, (v_ground - v_wind) / v_min, 1e-4f);
 	EXPECT_GT(h.transition_readiness, t.transition_readiness);
 }
 
@@ -2827,19 +2876,23 @@ TEST(MyopicFramerate, StabilityIsFramerateIndependent)
 // speed at R and pushes the airspeed to R -/+ 3.
 TEST(MyopicLaunch, WindAlongTheRunwayShiftsGroundSpeedNotAirspeed)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	ASSERT_TRUE(out->aerial.has_value());
 	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
 
 	const float R = float(out->aerial->min_flight_speed_m_s);
-	const float w = 3.f;
+	// A FRACTION of the requirement, not an absolute wind: this test moved from
+	// batto (R = 7.867) to the dragonfly (R = 2.631) and a hardcoded 3 m/s went
+	// from "a brisk headwind" to "more than the whole requirement", which is a
+	// different test (and has one of its own, immediately below).
+	const float w = 0.4f * R;
 	ASSERT_GT(R, w) << "the headwind must not swallow the whole requirement here";
 
 	struct Case { const char* name; float wind_z; float expected_ground; };
 	const Case cases[] = {
-		{"headwind", -w, R - w},   // dot(wind, +Z) = -3 -> a shorter run
-		{"tailwind", +w, R + w},   // dot(wind, +Z) = +3 -> a longer one
+		{"headwind", -w, R - w},   // dot(wind, +Z) = -w -> a shorter run
+		{"tailwind", +w, R + w},   // dot(wind, +Z) = +w -> a longer one
 		{"still",    0.f, R},
 	};
 
@@ -2865,7 +2918,7 @@ TEST(MyopicLaunch, WindAlongTheRunwayShiftsGroundSpeedNotAirspeed)
 // caller's, here the gait's own top speed.
 TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	const float R = float(out->aerial->min_flight_speed_m_s);
 
@@ -2874,14 +2927,23 @@ TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
 	ASSERT_TRUE(env.has_value());
 	const float gait_top = float(env->max_speed);
 	ASSERT_LT(gait_top, R) << "this gait must not cover flight speed on its own";
+	// "The caller's own speed" on a launch run that leaves desired_speed_m_s at
+	// its < 0 default is CRUISE, not the gait ceiling -- that is what the header
+	// promises and what the controller now delivers. This expectation read
+	// `gait_top` while the code substituted max_speed, so the two agreed by
+	// accident; they are different numbers (dragonfly gait 2: cruise 0.0356 m/s
+	// against a 0.1390 m/s sprint ceiling) and this is the fixture that says so.
+	const float cruise = float(env->cruise_speed);
+	ASSERT_GT(cruise, 0.f);
 
 	LaunchRunResult r = SimulateLaunchRun(*out, /*gait=*/2, /*frames=*/3000,
 	                                      glm::vec3(0.f, 0.f, -wind));
 	std::cerr << "[launch floor 0] wind=" << wind << " ground=" << r.ground_speed
-	          << " gait_top=" << gait_top << " airspeed=" << r.airspeed
+	          << " cruise=" << cruise << " gait_top=" << gait_top
+	          << " airspeed=" << r.airspeed
 	          << " readiness=" << r.readiness << "\n";
 
-	EXPECT_NEAR(r.ground_speed, gait_top, 1e-2f * gait_top)
+	EXPECT_NEAR(r.ground_speed, cruise, 1e-2f * cruise)
 		<< "with the requirement already met, the speed channel belongs to the caller";
 	EXPECT_NEAR(r.readiness, 1.f, 1e-4f);
 	EXPECT_GT(r.airspeed, R) << "standing in this wind is already flying";
@@ -2896,7 +2958,7 @@ TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
 // the case that distinguishes them.
 TEST(MyopicLaunch, TheLaunchRequirementIsAFloorNotACeiling)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	const float R = float(out->aerial->min_flight_speed_m_s);
 
@@ -2945,6 +3007,13 @@ LaunchFacts ExpectedFacts(const Output& o, const MyopicInput& in, float airspeed
 		? float(o.jumping->takeoff_velocity_m_s) : 0.f;
 	f.substrate                   = in.substrate;
 	f.can_use_water_taxi          = t.can_use_water_taxi;
+	// Recomputed from `o` here rather than borrowed from the adapter, for the
+	// same reason as every other field on this oracle: a value that travelled
+	// through MakeLaunchFacts cannot pin MakeLaunchFacts. This spells out the
+	// reconciliation the adapter is supposed to perform -- the AERIAL envelope
+	// must exist, at THIS input's gravity.
+	f.can_sustain_flight          = ExtractEnvelope(
+		o, LocomotionMode::AERIAL, 0, in.gravity_m_s2).has_value();
 	f.wing_loading_ok             = t.constraints.wing_loading_ok;
 	f.power_loading_ok            = t.constraints.power_loading_ok;
 	f.aspect_ratio_ok             = t.constraints.aspect_ratio_ok;
@@ -3177,7 +3246,7 @@ TEST(MyopicEntryPoint, ForwardsTheRequiredDrop)
 // (keep going) versus standing somewhere it can never take off from (give up).
 TEST(MyopicEntryPoint, LaunchFeasibilityIsNotTheSameFactAsTheBlockingReason)
 {
-	const Output* out = Analyze("batto.glb", Env::Air);
+	const Output* out = Analyze(kLaunchFlyer, Env::Air);
 	ASSERT_NE(out, nullptr);
 	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
 	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
@@ -3889,4 +3958,579 @@ TEST(MyopicSteer, ABrachiatorsEnvelopeShapeIsSafeDownstream)
 		EXPECT_EQ(r.strategy, TurnStrategy::LATERAL) << "v=" << v;
 		EXPECT_FLOAT_EQ(r.bank_angle_rad, 0.f)       << "v=" << v;
 	}
+}
+
+
+// ===========================================================================
+// Whole-branch review, final round. Every test below exists because an
+// end-to-end pass found a defect no single-task review could see.
+// ===========================================================================
+
+// --- K1: the launch planner and ExtractEnvelope must agree -----------------
+//
+// The planner gated on `analysis.aerial.has_value()`; ExtractEnvelope
+// additionally demands a usable speed band AND a positive mechanical power
+// surplus. Nothing reconciled them, and there was no BlockingReason for "has an
+// aerial analysis but cannot sustain flight".
+//
+// Measured on batto.glb, 60 s launch run from TERRESTRIAL/GROUND at 60 Hz:
+//   BEFORE  aerial_analysis=1 aerial_envelope=0
+//           -> speed 7.867 (exactly its stall), readiness 1.000,
+//              launch_feasible 1, and then, in AERIAL,
+//              blocking_reason = MODE_UNAVAILABLE with every channel 0.
+//   AFTER   -> readiness 0.000, launch_feasible 0,
+//              blocking_reason = CANNOT_SUSTAIN_FLIGHT, speed 0.579 (its own
+//              gait-0 cruise; the launch floor is gone because there is no
+//              launch).
+//
+// MODE_UNAVAILABLE is documented at tonton_myopic.h as "a caller error". It was
+// not: the module produced it.
+TEST(MyopicLaunchDispatch, ALaunchIsRefusedWhenFlightCannotBeSustained)
+{
+	// Everything about the takeoff itself is fine -- RUNNING_TAKEOFF on good
+	// ground, at flight speed already -- and the only thing wrong is that there
+	// is nowhere to arrive.
+	LaunchFacts f = BaseFacts(TakeoffMode::RUNNING_TAKEOFF);
+	f.airspeed_m_s = 100.f;
+
+	LaunchPlan ok = PlanLaunch(f);
+	ASSERT_TRUE(ok.feasible) << "fixture must be a launch that would otherwise succeed";
+	ASSERT_NEAR(ok.readiness, 1.f, 1e-6f);
+
+	f.can_sustain_flight = false;
+	LaunchPlan refused = PlanLaunch(f);
+	EXPECT_FALSE(refused.feasible);
+	EXPECT_EQ(refused.readiness, 0.f);
+	EXPECT_EQ(refused.blocking_reason, BlockingReason::CANNOT_SUSTAIN_FLIGHT);
+	EXPECT_FALSE(refused.accelerate_along_heading)
+		<< "do not run a creature down a runway toward a mode that does not exist";
+
+	// THREE DISTINCT READINGS, which is the whole point of adding one.
+	EXPECT_NE(refused.blocking_reason, BlockingReason::NO_AERIAL_ANALYSIS);
+	EXPECT_NE(refused.blocking_reason, BlockingReason::MODE_UNAVAILABLE);
+
+	// ...but the descriptive facts survive the refusal: a caller diagnosing WHY
+	// still wants the numbers.
+	EXPECT_FLOAT_EQ(refused.required_airspeed_m_s, f.required_airspeed_m_s);
+	EXPECT_GT(refused.required_drop_m, 0.f);
+}
+
+// PRECEDENCE. A named constraint failure is a strictly more specific diagnosis
+// of the same fact, so TM::IMPOSSIBLE keeps speaking first. Deleting the
+// `f.mode != TM::IMPOSSIBLE` conjunct turns every one of these into
+// CANNOT_SUSTAIN_FLIGHT and loses the actionable half.
+TEST(MyopicLaunchDispatch, ANamedConstraintOutranksTheSustainedFlightGate)
+{
+	struct Case { bool LaunchFacts::* flag; BlockingReason reason; };
+	const Case cases[] = {
+		{&LaunchFacts::wing_loading_ok,  BlockingReason::WING_LOADING},
+		{&LaunchFacts::power_loading_ok, BlockingReason::POWER_LOADING},
+		{&LaunchFacts::aspect_ratio_ok,  BlockingReason::ASPECT_RATIO},
+		{&LaunchFacts::leg_strength_ok,  BlockingReason::LEG_STRENGTH},
+	};
+	for (auto const& c : cases) {
+		LaunchFacts f = BaseFacts(TakeoffMode::IMPOSSIBLE);
+		f.*(c.flag) = false;
+		f.can_sustain_flight = false;   // both are true of this creature at once
+		EXPECT_EQ(PlanLaunch(f).blocking_reason, c.reason)
+			<< "the specific constraint must survive the sustained-flight gate";
+	}
+	// penguin.glb in air is exactly this: IMPOSSIBLE, wing_loading_ok false, and
+	// no aerial envelope. It must still report WING_LOADING (= 4), which is what
+	// a caller can act on.
+	const Output* out = Analyze("penguin.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	ASSERT_FALSE(ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, 9.81f).has_value());
+	MyopicInput in;
+	in.mode = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	EXPECT_EQ(PlanLaunch(*out, in, 1000.f).blocking_reason, BlockingReason::WING_LOADING);
+}
+
+// THE INTEGRATION TEST the review asked for: drive the launch to completion and
+// assert the PROMISE and the DELIVERY agree.
+//
+// Stated as a biconditional rather than as "batto is refused", so it keeps its
+// meaning if the upstream Species.Bat clade defect is ever fixed: whatever the
+// planner promises, switching to AERIAL must deliver it.
+TEST(MyopicLaunch, ThePromiseAndTheDeliveryAgree)
+{
+	struct Case { const char* file; Env env; };
+	const Case cases[] = {
+		{"batto.glb", Env::Air}, {"penguin.glb", Env::Air}, {"dragonfly.glb", Env::Air},
+	};
+
+	for (auto const& c : cases) {
+		const Output* out = Analyze(c.file, c.env);
+		ASSERT_NE(out, nullptr) << c.file;
+		ASSERT_TRUE(out->aerial.has_value())
+			<< c.file << ": this test is about creatures that HAVE an aerial section";
+
+		const float dt = 1.f / 60.f;
+		MyopicState st{};
+		MyopicInput in;
+		in.mode            = LocomotionMode::TERRESTRIAL;
+		in.target_mode     = LocomotionMode::AERIAL;
+		in.substrate       = Substrate::GROUND;
+		in.current_gait    = 2;
+		in.dt_s            = dt;
+		in.target_position = glm::vec3(0.f, 0.f, 1e6f);
+
+		MyopicOutput o;
+		for (int i = 0; i < 60 * 60; ++i) {          // 60 s
+			o = ComputeMyopicControl(*out, in, st);
+			in.velocity_m_s += o.linear_acceleration_m_s2 * dt;
+			in.position     += in.velocity_m_s * dt;
+		}
+
+		std::cerr << "[launch promise] " << c.file
+		          << " speed=" << glm::length(in.velocity_m_s)
+		          << " readiness=" << o.transition_readiness
+		          << " feasible=" << o.launch_feasible
+		          << " reason=" << int(o.blocking_reason) << "\n";
+
+		// Now do exactly what the module said, and see whether it meant it.
+		MyopicInput air = in;
+		air.mode = LocomotionMode::AERIAL;
+		MyopicState st_air{};
+		MyopicOutput a = ComputeMyopicControl(*out, air, st_air);
+
+		const bool cleared = o.launch_feasible
+		                  && o.transition_readiness >= 1.f - 1e-4f;
+		const bool aerial_exists =
+			ExtractEnvelope(*out, LocomotionMode::AERIAL, 0, air.gravity_m_s2).has_value();
+
+		if (cleared) {
+			// THE DEFECT: this used to hold for batto with aerial_exists false.
+			EXPECT_TRUE(aerial_exists)
+				<< c.file << ": cleared for takeoff into a mode that does not exist";
+			EXPECT_NE(a.blocking_reason, BlockingReason::MODE_UNAVAILABLE)
+				<< c.file << ": the module produced its own caller-error code";
+		} else {
+			// A refusal must NAME something, and must not be silence.
+			EXPECT_NE(o.blocking_reason, BlockingReason::NONE) << c.file;
+			// ...and specifically, a creature with an aerial section but no
+			// aerial envelope must never be told the analysis is missing.
+			EXPECT_NE(o.blocking_reason, BlockingReason::NO_AERIAL_ANALYSIS) << c.file;
+		}
+
+		// The biconditional itself, in both directions.
+		if (!aerial_exists) {
+			EXPECT_FALSE(o.launch_feasible)
+				<< c.file << ": promised a launch it cannot complete";
+			EXPECT_LT(o.transition_readiness, 1.f) << c.file;
+		}
+	}
+}
+
+// --- K2: `desired_speed_m_s < 0` means CRUISE ------------------------------
+//
+// tonton_myopic.h:77 and the approved spec both say "controller picks cruise";
+// the code substituted env->max_speed. Measured over 200 s at 60 Hz on
+// defaults, BEFORE -> AFTER:
+//
+//   model      mode         settles      envelope max   cruise      stability
+//   cat  g2    TERRESTRIAL  12.7127 ->  5.2916  12.7127  5.2916   0.0000 -> 0.5838
+//   dragonfly  AERIAL       20.9847 -> 12.5573  20.9849 12.5574   0.0000 -> 0.4016
+//   shark      AQUATIC      20.2945 ->  2.5348  20.2945  2.5348   0.0000 -> 0.8751
+//
+// The shark held its ANAEROBIC BURST speed indefinitely, 8.0x its cruise. And
+// u_speed was identically 1 everywhere, so `stability` -- the field the header
+// names as the one a caller keys on -- read exactly 0 for a creature doing
+// nothing at all unusual, colliding with the two other meanings 0 carries.
+namespace {
+
+struct CruiseCase { const char* file; Env env; LocomotionMode mode; int gait; };
+
+// The analysis-layer speed each arm is supposed to be reporting, read straight
+// off `Output` so this is an oracle and not a restatement of the arm.
+float AnalysisCruise(const Output& o, LocomotionMode m)
+{
+	switch (m) {
+	case LocomotionMode::TERRESTRIAL: return float(o.terrestrial->optimal_speed_m_s);
+	case LocomotionMode::AERIAL:      return float(o.aerial->cruise_speed_m_s);
+	case LocomotionMode::AQUATIC:     return float(o.aquatic->cruise_speed_m_s);
+	case LocomotionMode::SERPENTINE:  return float(o.serpentine->lateral_undulation_speed_m_s);
+	case LocomotionMode::CLIMBING:    return float(o.climbing->max_climb_speed_m_s);
+	case LocomotionMode::BRACHIATION: return float(o.brachiation->max_swing_speed_m_s);
+	}
+	return 0.f;
+}
+
+} // namespace
+
+TEST(MyopicEnvelope, EveryArmStatesACruiseSpeedInsideItsOwnBand)
+{
+	const CruiseCase cases[] = {
+		{"cat.glb",       Env::Air,   LocomotionMode::TERRESTRIAL, 0},
+		{"cat.glb",       Env::Air,   LocomotionMode::TERRESTRIAL, 1},
+		{"cat.glb",       Env::Air,   LocomotionMode::TERRESTRIAL, 2},
+		{"batto.glb",     Env::Air,   LocomotionMode::TERRESTRIAL, 2},
+		{"dragonfly.glb", Env::Air,   LocomotionMode::AERIAL,      0},
+		{"penguin.glb",   Env::Ocean, LocomotionMode::AQUATIC,     0},
+		{"shark.glb",     Env::Ocean, LocomotionMode::AQUATIC,     0},
+		{"eel.glb",       Env::Ocean, LocomotionMode::AQUATIC,     0},
+		{"eel.glb",       Env::Ocean, LocomotionMode::SERPENTINE,  0},
+		{"treefrog.glb",  Env::Air,   LocomotionMode::CLIMBING,    0},
+	};
+
+	int seen = 0;
+	for (auto const& c : cases) {
+		const Output* o = Analyze(c.file, c.env);
+		ASSERT_NE(o, nullptr) << c.file;
+		auto env = ExtractEnvelope(*o, c.mode, c.gait, 9.81f);
+		if (!env.has_value()) continue;   // that mode's absence is other tests' business
+		++seen;
+
+		const std::string where =
+			std::string(c.file) + " mode " + std::to_string(int(c.mode));
+
+		// STATED, not defaulted. A 0 here is the bug this field exists to stop.
+		EXPECT_GT(float(env->cruise_speed), 0.f) << where;
+		EXPECT_TRUE(std::isfinite(float(env->cruise_speed))) << where;
+
+		// INSIDE ITS OWN BAND. Nothing downstream would divide by it, but a
+		// cruise above the ceiling is a default command the envelope forbids.
+		EXPECT_GE(float(env->cruise_speed), float(env->min_speed)) << where;
+		EXPECT_LE(float(env->cruise_speed), float(env->max_speed)) << where;
+
+		// ...and it is the analysis layer's own number, not a fraction of
+		// max_speed. This is what kills a `max_speed * k` substitution.
+		EXPECT_FLOAT_EQ(float(env->cruise_speed), AnalysisCruise(*o, c.mode)) << where;
+	}
+	EXPECT_GE(seen, 8) << "the sweep must actually reach most arms";
+}
+
+// The behaviour, end to end: leave desired_speed_m_s at its < 0 default and see
+// where the creature settles. This is the mutant-killer -- substituting
+// max_speed, or any fraction of it, moves the settled speed.
+TEST(MyopicEntryPoint, TheDefaultSpeedCommandIsCruiseNotMax)
+{
+	const CruiseCase cases[] = {
+		{"cat.glb",       Env::Air,   LocomotionMode::TERRESTRIAL, 2},
+		{"dragonfly.glb", Env::Air,   LocomotionMode::AERIAL,      0},
+		{"shark.glb",     Env::Ocean, LocomotionMode::AQUATIC,     0},
+	};
+
+	for (auto const& c : cases) {
+		const Output* o = Analyze(c.file, c.env);
+		ASSERT_NE(o, nullptr) << c.file;
+		auto env = ExtractEnvelope(*o, c.mode, c.gait, 9.81f);
+		ASSERT_TRUE(env.has_value()) << c.file;
+
+		const float cruise = float(env->cruise_speed);
+		const float top    = float(env->max_speed);
+		ASSERT_LT(cruise, top * 0.995f)
+			<< c.file << ": pick a case where cruise and the ceiling actually differ";
+
+		const float dt = 1.f / 60.f;
+		MyopicState st{};
+		MyopicInput in;
+		in.mode              = c.mode;
+		in.target_mode       = c.mode;
+		in.current_gait      = c.gait;
+		in.dt_s              = dt;
+		in.desired_speed_m_s = -1.f;      // THE CONTRACT UNDER TEST
+		in.target_position   = glm::vec3(0.f, 0.f, 1e6f);
+
+		MyopicOutput out;
+		for (int i = 0; i < 200 * 60; ++i) {   // 200 s
+			out = ComputeMyopicControl(*o, in, st);
+			in.velocity_m_s += out.linear_acceleration_m_s2 * dt;
+			in.position     += in.velocity_m_s * dt;
+		}
+		const float settled = glm::length(in.velocity_m_s);
+
+		std::cerr << "[cruise default] " << c.file << " settled=" << settled
+		          << " cruise=" << cruise << " max=" << top
+		          << " stability=" << out.stability << "\n";
+
+		EXPECT_NEAR(settled, cruise, 1e-2f * cruise) << c.file;
+		EXPECT_LT(settled, top * 0.995f)
+			<< c.file << ": the default command must not be the ceiling";
+
+		// ...and the consequence that made this worth fixing: a creature doing
+		// nothing unusual must not report "at the limit" on the field the public
+		// header names as the one a caller keys on.
+		EXPECT_GT(out.stability, 0.05f) << c.file;
+		EXPECT_GT(out.speed_headroom, 0.05f) << c.file;
+	}
+}
+
+// --- K3: gait advice only for modes that have gaits ------------------------
+//
+// suggest_gait_change was computed unconditionally, so a dragonfly in AERIAL and
+// a shark in AQUATIC both reported it -- an action neither caller can take, and
+// one already carried exactly by speed_headroom < 0.
+TEST(MyopicSteer, GaitChangeIsOnlySuggestedForModesThatHaveGaits)
+{
+	struct Case { const char* file; Env env; LocomotionMode mode; bool expect_gaits; };
+	const Case cases[] = {
+		{"cat.glb",       Env::Air,   LocomotionMode::TERRESTRIAL, true},
+		{"dragonfly.glb", Env::Air,   LocomotionMode::AERIAL,      false},
+		{"shark.glb",     Env::Ocean, LocomotionMode::AQUATIC,     false},
+		{"eel.glb",       Env::Ocean, LocomotionMode::SERPENTINE,  false},
+		{"treefrog.glb",  Env::Air,   LocomotionMode::CLIMBING,    false},
+	};
+
+	int gaitless_seen = 0;
+	for (auto const& c : cases) {
+		const Output* o = Analyze(c.file, c.env);
+		ASSERT_NE(o, nullptr) << c.file;
+		auto env = ExtractEnvelope(*o, c.mode, 0, 9.81f);
+		if (!env.has_value()) continue;
+
+		EXPECT_EQ(env->has_gaits, c.expect_gaits)
+			<< c.file << ": TERRESTRIAL is the only mode with a gait concept";
+		if (!c.expect_gaits) ++gaitless_seen;
+
+		// Ask for twice the ceiling: unambiguously more than the mode can do.
+		SteerState st{};
+		SteerCommand cmd;
+		cmd.current_speed_m_s = 0.5f * float(env->max_speed);
+		cmd.desired_speed_m_s = 2.0f * float(env->max_speed);
+		cmd.dt_s              = 1.f / 60.f;
+		SteerResult r = Steer(*env, st, cmd);
+
+		EXPECT_EQ(r.suggest_gait_change, c.expect_gaits)
+			<< c.file << " mode " << int(c.mode);
+		// The demand really was excessive, so this is not vacuous: the flag was
+		// withheld because there is no gait, not because nothing was wrong.
+		EXPECT_LT(r.speed_headroom, 1.f) << c.file;
+	}
+	EXPECT_GE(gaitless_seen, 3) << "the gaitless half must actually be exercised";
+}
+
+// --- K4: TERRESTRIAL's two load-bearing values, pinned ---------------------
+//
+// This arm was the one outside the envelope invariants and its two most
+// load-bearing numbers were unobserved. Both mutants below SURVIVED the whole
+// 99-test suite:
+//   tau_linear = optimal_speed/max_accel  ->  max_speed/max_accel   (3x at gallop)
+//   max_brake  = max_accel                ->  max_accel * 0.1f
+// The aerial arm's equivalents are caught immediately by
+// AerialMaxAccelMatchesClosedForm and AerialLoadFactorMatchesClosedForm;
+// TerrestrialInvariants asserted only `tau > 0 && isfinite` and said nothing
+// about the brake at all.
+TEST(MyopicEnvelope, TerrestrialTauMatchesClosedForm)
+{
+	const char* files[] = {"cat.glb", "batto.glb", "dragonfly.glb", "treefrog.glb"};
+	for (const char* file : files) {
+		const Output* o = Analyze(file, Env::Air);
+		ASSERT_NE(o, nullptr) << file;
+		if (!o->terrestrial.has_value()) continue;
+
+		const float v_opt  = float(o->terrestrial->optimal_speed_m_s);
+		const float a_max  = float(o->terrestrial->max_acceleration_m_s2);
+		ASSERT_GT(a_max, 0.f) << file;
+		const float expected = v_opt / a_max;
+
+		for (int gait = 0; gait <= 2; ++gait) {
+			auto env = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, gait, 9.81f);
+			ASSERT_TRUE(env.has_value()) << file << " gait " << gait;
+			EXPECT_NEAR(float(env->tau_linear), expected, 1e-5f * std::max(1.f, expected))
+				<< file << " gait " << gait;
+
+			// GAIT-INVARIANT, which is the specific thing a max_speed numerator
+			// would break: tau retimes the slew, the anti-overshoot bound and
+			// u_turn's numerator all at once, and none of those may change
+			// because the caller picked a different gait.
+			auto g0 = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, 0, 9.81f);
+			EXPECT_FLOAT_EQ(float(env->tau_linear), float(g0->tau_linear))
+				<< file << " gait " << gait << ": tau must not depend on the gait";
+		}
+
+		// And the two candidate numerators must actually differ somewhere, or
+		// the pin above proves nothing.
+		auto g2 = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, 2, 9.81f);
+		ASSERT_TRUE(g2.has_value());
+		EXPECT_GT(float(g2->max_speed), v_opt * 1.05f)
+			<< file << ": sprint must exceed optimal, or the mutant is unobservable";
+	}
+}
+
+TEST(MyopicEnvelope, TerrestrialBrakeIsTheSameGripBudgetAsAccel)
+{
+	const char* files[] = {"cat.glb", "batto.glb", "dragonfly.glb", "treefrog.glb"};
+	for (const char* file : files) {
+		const Output* o = Analyze(file, Env::Air);
+		ASSERT_NE(o, nullptr) << file;
+		if (!o->terrestrial.has_value()) continue;
+
+		for (int gait = 0; gait <= 2; ++gait) {
+			auto env = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, gait, 9.81f);
+			ASSERT_TRUE(env.has_value()) << file;
+			// EQUALITY, deliberately, not an inequality: legs brake with exactly
+			// the friction they accelerate with, and there is no second figure in
+			// Analysis_Terrestrial. Any fabricated coefficient -- 0.1, 0.5, 2.0 --
+			// fails here, which is what the aquatic arm's
+			// AquaticBrakeIsAFloorNotACeiling does for its own (different) claim.
+			EXPECT_FLOAT_EQ(float(env->max_brake), float(env->max_accel))
+				<< file << " gait " << gait;
+			EXPECT_FLOAT_EQ(float(env->max_accel),
+			                float(o->terrestrial->max_acceleration_m_s2))
+				<< file << " gait " << gait;
+		}
+	}
+}
+
+// The invariant the arm was missing outright. Every OTHER arm gates on
+// UsableAccel; this one did not, and 0/0 there is a NaN tau that propagates
+// through std::max(NaN, dt) into turn_stop_bound and out to `stability`.
+TEST(MyopicEnvelope, TerrestrialEnvelopesCarryAUsableAcceleration)
+{
+	const char* files[] = {"cat.glb", "batto.glb", "dragonfly.glb",
+	                       "treefrog.glb", "penguin.glb", "shark.glb", "eel.glb"};
+	for (const char* file : files) {
+		const Output* o = Analyze(file, Env::Air);
+		ASSERT_NE(o, nullptr) << file;
+		for (int gait = 0; gait <= 2; ++gait) {
+			auto env = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, gait, 9.81f);
+			if (!env.has_value()) continue;   // absence is the honest alternative
+			EXPECT_GT(float(env->max_accel), 0.f) << file << " gait " << gait;
+			EXPECT_TRUE(std::isfinite(float(env->max_accel))) << file;
+			EXPECT_TRUE(std::isfinite(float(env->tau_linear)))
+				<< file << " gait " << gait << ": a NaN tau reaches `stability`";
+			EXPECT_GT(float(env->tau_linear), 0.f) << file << " gait " << gait;
+		}
+	}
+}
+
+// --- K5: the aerial lateral fields are a summary, not a control input ------
+//
+// Steer sets omega_max from env.max_lateral_accel and then overwrites it on
+// every path a flyer can take. Corrupting those two fields must therefore change
+// NOTHING a flyer does -- which is the claim the source comments at both sites
+// now make, and this is what makes it checkable rather than merely asserted.
+TEST(MyopicBank, AerialLateralFieldsReachNoConsumerInSteer)
+{
+	const Output* o = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(o, nullptr);
+	auto base = ExtractEnvelope(*o, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(base.has_value());
+	ASSERT_GT(float(base->max_lateral_accel), 0.f) << "there must be something to corrupt";
+
+	Envelope corrupted = *base;
+	corrupted.max_lateral_accel = acceleration_m_s2{1e6f};
+	corrupted.min_turn_radius   = length_m{1e6f};
+
+	const float speeds[] = {
+		float(base->aerial->stall_speed) * 1.05f,
+		float(base->aerial->cruise_speed),
+		float(base->max_speed) * 0.95f,
+	};
+
+	for (float v : speeds) {
+		for (float err : {0.05f, 0.6f, 1.5f, -1.2f}) {
+			SteerState sa{}, sb{};
+			SteerCommand cmd;
+			cmd.angle_error_rad   = err;
+			cmd.current_speed_m_s = v;
+			cmd.desired_speed_m_s = v;
+			cmd.dt_s              = 1.f / 60.f;
+
+			SteerResult ra, rb;
+			for (int i = 0; i < 200; ++i) {
+				ra = Steer(*base,      sa, cmd);
+				rb = Steer(corrupted,  sb, cmd);
+			}
+			const std::string where =
+				"v=" + std::to_string(v) + " err=" + std::to_string(err);
+			EXPECT_FLOAT_EQ(ra.turn_rate_rad_s, rb.turn_rate_rad_s) << where;
+			EXPECT_FLOAT_EQ(ra.bank_angle_rad,  rb.bank_angle_rad)  << where;
+			EXPECT_FLOAT_EQ(ra.turn_headroom,   rb.turn_headroom)   << where;
+			EXPECT_EQ(ra.strategy,              rb.strategy)        << where;
+		}
+	}
+
+	// The contrast that gives the test teeth: on a GROUND envelope the same
+	// field is the whole turn budget, so corrupting it changes everything.
+	auto ground = ExtractEnvelope(*o, LocomotionMode::TERRESTRIAL, 2, 9.81f);
+	ASSERT_TRUE(ground.has_value());
+	Envelope ground_corrupt = *ground;
+	ground_corrupt.max_lateral_accel = acceleration_m_s2{1e6f};
+	SteerState g1{}, g2{};
+	SteerCommand gcmd;
+	gcmd.angle_error_rad   = 1.5f;
+	gcmd.current_speed_m_s = 0.9f * float(ground->max_speed);
+	gcmd.desired_speed_m_s = gcmd.current_speed_m_s;
+	gcmd.dt_s              = 1.f / 60.f;
+	SteerResult r1 = Steer(*ground, g1, gcmd);
+	SteerResult r2 = Steer(ground_corrupt, g2, gcmd);
+	EXPECT_NE(r1.turn_rate_rad_s, r2.turn_rate_rad_s)
+		<< "for a GROUND envelope max_lateral_accel is the turn budget itself";
+}
+
+// --- K6: current_speed_m_s is a MAGNITUDE, on every channel ----------------
+//
+// Steer read it both ways: fabs for the turn and stall channels, signed for
+// u_speed and speed_error. A negative speed therefore counted as positive speed
+// against the centripetal and stall budgets while reporting a NEGATIVE u_speed
+// -- strictly more comfortable than idle -- on the same frame. Both mutants were
+// unobserved: dropping the fabs and adding one each left 99/99 green.
+TEST(MyopicSteer, SpeedIsAMagnitudeOnEveryChannel)
+{
+	// A stall floor and an aerial authority, so u_stall, u_turn and u_speed are
+	// all live -- the previous fixtures held min_speed at 0, which is half of
+	// why this was invisible.
+	const Output* o = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(o, nullptr);
+	auto env = ExtractEnvelope(*o, LocomotionMode::AERIAL, 0, 9.81f);
+	ASSERT_TRUE(env.has_value());
+	ASSERT_GT(float(env->min_speed), 0.f) << "the stall channel must be live";
+
+	const float speeds[] = {
+		0.5f * float(env->min_speed),      // below the floor
+		float(env->aerial->cruise_speed),
+		0.9f * float(env->max_speed),
+	};
+
+	for (float v : speeds) {
+		for (float err : {0.f, 0.8f, -1.3f}) {
+			SteerState sp{}, sn{};
+			SteerCommand pos;
+			pos.angle_error_rad   = err;
+			pos.current_speed_m_s = v;
+			pos.desired_speed_m_s = float(env->aerial->cruise_speed);
+			pos.dt_s              = 1.f / 60.f;
+			SteerCommand neg = pos;
+			neg.current_speed_m_s = -v;
+
+			SteerResult rp, rn;
+			for (int i = 0; i < 50; ++i) {
+				rp = Steer(*env, sp, pos);
+				rn = Steer(*env, sn, neg);
+			}
+			const std::string where =
+				"v=" + std::to_string(v) + " err=" + std::to_string(err);
+
+			// -v is treated EXACTLY as |v| -- there is no reverse channel.
+			EXPECT_FLOAT_EQ(rp.stability,      rn.stability)      << where;
+			EXPECT_FLOAT_EQ(rp.speed_headroom, rn.speed_headroom) << where;
+			EXPECT_FLOAT_EQ(rp.turn_headroom,  rn.turn_headroom)  << where;
+			EXPECT_FLOAT_EQ(rp.accel_m_s2,     rn.accel_m_s2)     << where;
+			EXPECT_FLOAT_EQ(rp.turn_rate_rad_s, rn.turn_rate_rad_s) << where;
+
+			// ...and specifically: a negative speed must never read as MORE
+			// comfortable than the speed channel's idle reading, which is what a
+			// signed u_speed did.
+			EXPECT_LE(rn.speed_headroom, 1.f) << where;
+		}
+	}
+
+	// Give the equality above its teeth: the three speeds must actually produce
+	// different readings, or "identical for +v and -v" would be trivially true.
+	auto read = [&](float v) {
+		SteerState st{};
+		SteerCommand cmd;
+		cmd.angle_error_rad   = 0.8f;
+		cmd.current_speed_m_s = v;
+		cmd.desired_speed_m_s = float(env->aerial->cruise_speed);
+		cmd.dt_s              = 1.f / 60.f;
+		SteerResult r;
+		for (int i = 0; i < 50; ++i) r = Steer(*env, st, cmd);
+		return r.stability;
+	};
+	EXPECT_NE(read(speeds[0]), read(speeds[2]));
 }
