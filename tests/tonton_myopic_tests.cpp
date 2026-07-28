@@ -396,6 +396,32 @@ TEST(MyopicSteer, StandingCreatureCanPivot)
 	EXPECT_TRUE(std::isfinite(r.turn_rate_rad_s));
 }
 
+// Added in task 5 after a perturbation test found this behaviour unasserted:
+// reintroducing the rejected `max_lateral_accel / 1e-3` divisor at zero speed
+// passed the entire suite. That divisor is not a guard, it is a claim -- it
+// fabricates an omega_max of ~8000 rad/s and then reports the real demand as a
+// comfortable 0.25% of it. Skipping the limit is the settled behaviour: at zero
+// speed the centripetal budget does not apply, so there is NO turning-authority
+// ratio to report and the turn channel must read exactly "not applicable"
+// (headroom 1.0), not "99.75% idle against an invented bound".
+TEST(MyopicSteer, StandingCreatureReportsNoFabricatedTurnBudget)
+{
+	Envelope env = TestEnvelope();      // max_lateral_accel = 8, tau = 0.25
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 5.0f;       // turn_stop_bound = 20 rad/s
+	cmd.current_speed_m_s = 0.f;
+	cmd.desired_speed_m_s = 0.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	// With the fabricated divisor this reads 1 - 20/8000 = 0.9975.
+	EXPECT_NEAR(r.turn_headroom, 1.f, 1e-6f)
+		<< "a fabricated omega_max leaked into the turn channel";
+	EXPECT_TRUE(std::isfinite(r.turn_headroom));
+}
+
 // Added in review round 1 (C2): every test above passed with the exponential
 // slew deleted outright (rate = clamp(error/dt, +/-omega_max), no SlewAlpha,
 // no Approach, no SteerState) -- the 1-exp(-dt/tau) shape this whole task
@@ -751,3 +777,343 @@ TEST(MyopicEnvelope, AerialPresenceFollowsPowerSurplus)
 	EXPECT_EQ(expected > 0.f, out->aerial->can_sustain_level_flight)
 		<< "envelope power budget disagrees with can_sustain_level_flight";
 }
+
+
+// ---------------------------------------------------------------------------
+// Bank-versus-yaw decision and the load-factor stall coupling.
+//
+// Two synthetic flyers with deliberately opposite authority profiles. Both are
+// given the SAME load-factor ceiling and the same lateral budget, so the only
+// thing that can decide between banking and yawing is the TIME each axis needs
+// -- which is the whole point of the decision rule.
+// ---------------------------------------------------------------------------
+namespace {
+
+Envelope DragonflyLikeEnvelope()   // huge yaw authority, tiny radius
+{
+	Envelope e = TestEnvelope();
+	e.min_speed = velocity_m_s{1.f};
+	AerialAuthority a;
+	a.max_roll_rate  = omega_rad_s{2.1f};
+	a.max_pitch_rate = omega_rad_s{0.4f};
+	a.max_yaw_rate   = omega_rad_s{4.1f};
+	a.n_max          = 2.f;
+	a.stall_speed    = velocity_m_s{1.f};
+	a.cruise_speed   = velocity_m_s{4.f};
+	e.aerial = a;
+	e.max_lateral_accel = acceleration_m_s2{9.81f * std::sqrt(3.f)};
+	return e;
+}
+
+Envelope AlbatrossLikeEnvelope()   // negligible yaw, strong roll
+{
+	Envelope e = TestEnvelope();
+	e.min_speed = velocity_m_s{8.f};
+	AerialAuthority a;
+	a.max_roll_rate  = omega_rad_s{1.5f};
+	a.max_pitch_rate = omega_rad_s{0.3f};
+	a.max_yaw_rate   = omega_rad_s{0.2f};
+	a.n_max          = 2.f;
+	a.stall_speed    = velocity_m_s{8.f};
+	a.cruise_speed   = velocity_m_s{15.f};
+	e.aerial = a;
+	e.max_lateral_accel = acceleration_m_s2{9.81f * std::sqrt(3.f)};
+	return e;
+}
+
+SteerCommand TurnCommand(float error, float speed)
+{
+	SteerCommand c;
+	c.angle_error_rad   = error;
+	c.current_speed_m_s = speed;
+	c.desired_speed_m_s = speed;
+	c.dt_s              = 1.f / 60.f;
+	c.gravity_m_s2      = 9.81f;
+	return c;
+}
+
+} // namespace
+
+TEST(MyopicBank, DragonflyYawsForTheSameTurnAnAlbatrossBanks)
+{
+	Envelope dragonfly = DragonflyLikeEnvelope();
+	Envelope albatross = AlbatrossLikeEnvelope();
+	SteerState s1{}, s2{};
+
+	SteerResult rd = Steer(dragonfly, s1, TurnCommand(1.57f, 4.f));
+	SteerResult ra = Steer(albatross, s2, TurnCommand(1.57f, 15.f));
+
+	EXPECT_EQ(rd.strategy, TurnStrategy::YAW);
+	EXPECT_EQ(ra.strategy, TurnStrategy::BANK);
+}
+
+TEST(MyopicStall, HardTurnNearStallDrivesStabilityNegative)
+{
+	Envelope env = AlbatrossLikeEnvelope();
+	SteerState state{};
+
+	// Flying just above stall (8.0) and demanding a hard turn. The load factor
+	// raises the effective stall speed by sqrt(n), so this must go unstable.
+	//
+	// MEASURED (see task-5-report.md): n(8.6) = 1.1556, phi_max = 0.5250 rad,
+	// effective stall speed 8.600 m/s, u_stall = 1.0000, u_turn = 18.16,
+	// stability = -17.16. Note WHICH channel supplies the negativity: with the
+	// speed-dependent load factor the stall term saturates at exactly 1 here
+	// (see BankingIsCappedByTheLoadFactorTheSpeedAllows below for why that is
+	// an identity, not a coincidence), so the demand that cannot be met is
+	// surfaced by the turn channel. Both are real; do not read this assertion
+	// as isolating the stall term.
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, TurnCommand(3.0f, 8.6f));
+
+	EXPECT_EQ(r.strategy, TurnStrategy::BANK);
+	EXPECT_GT(r.bank_angle_rad, 0.f);
+	EXPECT_LT(r.stability, 0.f) << "banking near stall must be unstable";
+
+	// The bank is held down to what 8.6 m/s can actually support, not to the
+	// cruise-time n_max = 2 (which would allow acos(1/2) = 1.047 rad).
+	EXPECT_NEAR(r.bank_angle_rad, std::acos(1.f / std::pow(8.6f / 8.f, 2.f)), 1e-3f);
+	EXPECT_LT(r.bank_angle_rad, std::acos(0.5f) - 0.4f);
+}
+
+// Isolates the stall channel from the turn channel, and pins the identity the
+// speed-dependent load factor creates.
+//
+// The aerodynamic boundary is n(v) = (v/Vs)^2, and banking raises the stall
+// speed to Vs/sqrt(cos phi) with cos phi = 1/n. Substituting: the effective
+// stall speed at the maximum permitted bank is Vs / (Vs/v) = v EXACTLY. So a
+// flyer banking as hard as its speed allows sits precisely ON its stall
+// boundary -- u_stall == 1, the "at the limit" reading -- and can never be
+// driven past it by banking, because the bank is capped by the very load
+// factor that defines the boundary. Falling BELOW the stall speed is what puts
+// it past the limit, and there no bank is available at all.
+//
+// tau_linear is stretched here purely to make turn_stop_bound (and hence
+// u_turn) negligible, so that only u_stall can move the result.
+TEST(MyopicStall, BankingIsCappedByTheLoadFactorTheSpeedAllows)
+{
+	auto probe = [](float v) {
+		Envelope env = AlbatrossLikeEnvelope();
+		env.max_speed  = velocity_m_s{30.f};  // keep u_speed out of the way
+		env.tau_linear = time_s{100.f};       // keep u_turn out of the way
+		SteerState state{};
+		SteerResult r{};
+		for (int i = 0; i < 600; ++i) r = Steer(env, state, TurnCommand(3.0f, v));
+		return r;
+	};
+
+	// Above stall, banking at the limit: exactly ON the boundary.
+	SteerResult above = probe(8.6f);
+	EXPECT_EQ(above.strategy, TurnStrategy::BANK);
+	EXPECT_GT(above.bank_angle_rad, 0.f);
+	EXPECT_NEAR(above.stability, 0.f, 1e-3f)
+		<< "max-bank at speed v sits exactly on the stall boundary";
+
+	// Same again well above stall: the ceiling n_max binds instead of the
+	// v^2 boundary, so there is genuine margin left.
+	SteerResult fast = probe(15.f);
+	EXPECT_GT(fast.stability, 0.2f) << "n_max binds, so stall margin remains";
+
+	// Below the stall speed: no bank is available (n(v) floors at 1) and the
+	// creature is past the floor on speed alone.
+	SteerResult below = probe(7.f);
+	EXPECT_NEAR(below.bank_angle_rad, 0.f, 1e-4f);
+	EXPECT_LT(below.stability, 0.f) << "below stall speed is past the limit";
+}
+
+TEST(MyopicStall, SameSpeedWingsLevelIsStable)
+{
+	Envelope env = AlbatrossLikeEnvelope();
+	SteerState state{};
+
+	// Identical speed, no turn demanded -> comfortably above stall.
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, TurnCommand(0.f, 8.6f));
+
+	EXPECT_GT(r.stability, 0.f) << "wings-level at the same speed must be fine";
+}
+
+// ---------------------------------------------------------------------------
+// Additions beyond the plan's four assertions. Each one exists because the plan
+// tests above survive a specific stub (see task-5-report.md's perturbation
+// table); these are the ones that do not.
+// ---------------------------------------------------------------------------
+
+// The load factor is a function of SPEED, not a stored cruise-time constant.
+// The aerodynamic V-n boundary is n(v) = (v/Vstall)^2, so AT the stall speed
+// the available load factor is exactly 1 -- zero bank angle, zero banked turn
+// rate. A flyer scraping along at stall cannot bank at all and must yaw.
+//
+// This is the test that fails if n(v) is stubbed to n_max: with n_max = 2 the
+// albatross would find t_bank = 1.44 s against t_yaw = 7.85 s and choose BANK.
+TEST(MyopicBank, LoadFactorFallsToOneAtStallSpeed)
+{
+	Envelope env = AlbatrossLikeEnvelope();   // stall 8, n_max 2, yaw 0.2
+	SteerState state{};
+
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, TurnCommand(1.57f, 8.f));
+
+	EXPECT_EQ(r.strategy, TurnStrategy::YAW)
+		<< "at exactly the stall speed the available load factor is 1: no bank is possible";
+	EXPECT_NEAR(r.bank_angle_rad, 0.f, 1e-4f);
+
+	// ...and well above stall the same flyer, same demand, banks. Same envelope,
+	// same error: only the speed differs, so only n(v) can explain the flip.
+	SteerState fast{};
+	SteerResult rf{};
+	for (int i = 0; i < 300; ++i) rf = Steer(env, fast, TurnCommand(1.57f, 15.f));
+	EXPECT_EQ(rf.strategy, TurnStrategy::BANK);
+	EXPECT_GT(rf.bank_angle_rad, 0.5f);
+}
+
+// Roll-in is a process. The bank angle must arrive at its target over several
+// frames at no more than max_roll_rate, never in one step. Fails outright if
+// the slew is removed and bank_angle_rad snaps to phi_target.
+TEST(MyopicBank, RollInIsAProcessNotAnInstant)
+{
+	Envelope env = AlbatrossLikeEnvelope(); // max_roll_rate = 1.5 rad/s
+	SteerState state{};
+	const float dt = 1.f / 60.f;
+	const float max_step = 1.5f * dt;       // 0.025 rad
+
+	float prev = 0.f;
+	for (int i = 0; i < 10; ++i) {
+		SteerResult r = Steer(env, state, TurnCommand(1.57f, 15.f));
+		ASSERT_LE(r.bank_angle_rad - prev, max_step + 1e-5f)
+			<< "bank angle jumped faster than max_roll_rate at step " << i;
+		ASSERT_GT(r.bank_angle_rad, prev - 1e-6f) << "bank angle went backwards at step " << i;
+		prev = r.bank_angle_rad;
+	}
+	// After 10 frames at 1.5 rad/s it can only have reached ~0.25 rad, nowhere
+	// near phi_max = acos(1/2) = 1.047 rad.
+	EXPECT_NEAR(prev, 10.f * max_step, 1e-3f);
+	EXPECT_LT(prev, 0.5f);
+
+	// Given enough frames it does arrive at the load-factor limit.
+	SteerResult r{};
+	for (int i = 0; i < 300; ++i) r = Steer(env, state, TurnCommand(1.57f, 15.f));
+	EXPECT_NEAR(r.bank_angle_rad, std::acos(0.5f), 1e-3f);
+}
+
+// The bank angle is SIGNED by the heading error, so a renderer can use it
+// directly and a reversal rolls back through wings-level instead of teleporting.
+TEST(MyopicBank, BankAngleIsSignedByTheHeadingError)
+{
+	Envelope env = AlbatrossLikeEnvelope();
+	SteerState left{}, right{};
+
+	SteerResult rl{}, rr{};
+	for (int i = 0; i < 300; ++i) {
+		rl = Steer(env, left,  TurnCommand(+1.57f, 15.f));
+		rr = Steer(env, right, TurnCommand(-1.57f, 15.f));
+	}
+
+	EXPECT_EQ(rl.strategy, TurnStrategy::BANK);
+	EXPECT_EQ(rr.strategy, TurnStrategy::BANK);
+	EXPECT_GT(rl.bank_angle_rad, 0.f);
+	EXPECT_LT(rr.bank_angle_rad, 0.f);
+	EXPECT_NEAR(rl.bank_angle_rad, -rr.bank_angle_rad, 1e-4f);
+
+	// The turn itself follows the error's sign, and the two are mirror images:
+	// nothing about the maneuver may depend on which way it goes.
+	EXPECT_GT(rl.turn_rate_rad_s, 0.f);
+	EXPECT_LT(rr.turn_rate_rad_s, 0.f);
+	EXPECT_NEAR(rl.turn_rate_rad_s, -rr.turn_rate_rad_s, 1e-4f);
+	EXPECT_NEAR(rl.stability, rr.stability, 1e-4f);
+
+	// Reversing the demand rolls back THROUGH wings-level rather than jumping
+	// to the mirrored bank: there must be a frame where |bank| is small.
+	float min_abs_bank = std::fabs(rl.bank_angle_rad);
+	for (int i = 0; i < 300; ++i) {
+		SteerResult r = Steer(env, left, TurnCommand(-1.57f, 15.f));
+		min_abs_bank = std::min(min_abs_bank, std::fabs(r.bank_angle_rad));
+	}
+	EXPECT_LT(min_abs_bank, 0.05f) << "bank teleported across wings-level";
+}
+
+// Framerate independence of the NEW state variable. Verified empirically at
+// four timesteps rather than asserted from the formula, per the brief.
+TEST(MyopicBank, RollInIsFramerateIndependent)
+{
+	auto bank_after = [](float dt, float wall_clock_s) {
+		Envelope env = AlbatrossLikeEnvelope();
+		SteerState state{};
+		SteerResult r{};
+		const int steps = static_cast<int>(std::lround(wall_clock_s / dt));
+		for (int i = 0; i < steps; ++i) {
+			SteerCommand cmd = TurnCommand(1.57f, 15.f);
+			cmd.dt_s = dt;
+			r = Steer(env, state, cmd);
+		}
+		return r.bank_angle_rad;
+	};
+
+	// 0.5 s of roll-in at 1.5 rad/s = 0.75 rad, still short of phi_max (1.047),
+	// so the answer is genuinely mid-slew and not pinned by the clamp.
+	const float t = 0.5f;
+	const float b16  = bank_after(1.f / 16.f,  t);
+	const float b30  = bank_after(1.f / 30.f,  t);
+	const float b60  = bank_after(1.f / 60.f,  t);
+	const float b120 = bank_after(1.f / 120.f, t);
+
+	// Bracket it: genuinely mid-slew, neither pinned at phi_max nor stuck at 0
+	// (all-zeros would otherwise make the agreement assertions vacuous).
+	EXPECT_NEAR(b60, 1.5f * t, 0.03f);
+	EXPECT_LT(b60, std::acos(0.5f) - 0.05f) << "clamped: pick a shorter wall clock";
+	EXPECT_NEAR(b16,  b60, 0.02f);
+	EXPECT_NEAR(b30,  b60, 0.02f);
+	EXPECT_NEAR(b120, b60, 0.02f);
+}
+
+// Non-aerial envelopes keep reporting GROUND and never acquire a bank angle:
+// the aerial path must not leak into the terrestrial one.
+TEST(MyopicBank, GroundEnvelopesStayGround)
+{
+	Envelope env = TestEnvelope(); // no aerial authority
+	SteerState state{};
+
+	SteerResult r{};
+	for (int i = 0; i < 60; ++i) r = Steer(env, state, TurnCommand(1.57f, 5.f));
+
+	EXPECT_EQ(r.strategy, TurnStrategy::GROUND);
+	EXPECT_FLOAT_EQ(r.bank_angle_rad, 0.f);
+}
+
+// The stall channel at and below a standstill. The old form read
+// min_speed/speed with a `speed > 1e-3 ? ... : 0` guard, so a creature with a
+// speed floor sitting at ZERO speed -- the worst possible stall -- reported as
+// perfectly idle. It must instead read as fully saturated or worse, stay
+// finite (an infinite stability poisons every downstream consumer), and be
+// MONOTONE: slower must never read better than faster.
+TEST(MyopicStall, StandstillWithASpeedFloorIsFullySaturated)
+{
+	Envelope env = TestEnvelope();
+	env.min_speed = velocity_m_s{3.f};
+
+	auto stability_at = [&](float v) {
+		SteerState state{};
+		SteerCommand cmd = TurnCommand(0.f, v); // zero error -> u_turn is 0
+		return Steer(env, state, cmd).stability;
+	};
+
+	const float s0   = stability_at(0.f);
+	const float s015 = stability_at(0.15f);
+	const float s150 = stability_at(1.5f);
+	const float s300 = stability_at(3.0f);   // exactly the floor
+	const float s600 = stability_at(6.0f);
+
+	EXPECT_TRUE(std::isfinite(s0)) << "stability must stay finite at rest";
+	EXPECT_LT(s0, 0.f) << "at rest with a speed floor is past the limit, not idle";
+
+	// Monotone in speed all the way down to zero -- no hole, no inversion.
+	EXPECT_LT(s0,   s015);
+	EXPECT_LT(s015, s150);
+	EXPECT_LT(s150, s300);
+	EXPECT_LT(s300, s600);
+
+	// At exactly the floor the stall term is 1 ("at the limit"), so stability
+	// there is governed by u_speed (3/10) alone: 1 - max(0.3, 1) = 0.
+	EXPECT_NEAR(s300, 0.f, 1e-4f);
+}
+
