@@ -1271,8 +1271,31 @@ TEST(MyopicBank, StrategyAccountsForTimeToCompleteTheTurn)
 
 // G1 follow-up: the anti-overshoot bound now shapes the bank TARGET rather than
 // the delivered rate, and roll-in lag sits between them. Verified by integrating
-// a real maneuver at four timesteps rather than asserted.
-TEST(MyopicBank, BankedTurnDoesNotOvershoot)
+// a real maneuver at six timesteps rather than asserted.
+//
+// Renamed in review round 2: it never asserted the ABSENCE of overshoot -- it
+// asserts overshoot is BOUNDED (>= -0.06 rad on a 1.57 rad maneuver), that the
+// excursion is a single lobe (<= 1 sign crossing), and that the maneuver
+// converges. The old name claimed the opposite of what the block comment below
+// says honestly.
+//
+// It also now carries the dt-parameterised pin for G1c (`turn_follows_bank`
+// keyed on the BANK, not on the strategy). That predicate was completely
+// unpinned: reverting it to `strategy == TurnStrategy::BANK` left all 42 tests
+// green, because the pathology is framerate-dependent AND non-monotone in dt,
+// so no single-rate test can see it. Frames with |bank| > 0.05 rad reporting
+// |turn_rate| < 1e-4 on this exact maneuver:
+//
+//     dt      fixed   G1c reverted   pre-G1
+//     1/16      0          0            5
+//     1/30      0          0           10
+//     1/60      0          0           19   <-- the only rate the old test ran
+//     1/120     0         22           38
+//     1/240     0          0           76
+//     1/480     0         80          153
+//
+// Hence the rate list below must stay at six rates spanning 16..480 Hz.
+TEST(MyopicBank, BankedTurnOvershootIsBoundedAndSingleLobed)
 {
 	auto run = [](float dt) {
 		Envelope env = AlbatrossLikeEnvelope();
@@ -1285,17 +1308,21 @@ TEST(MyopicBank, BankedTurnDoesNotOvershoot)
 		float error = 1.57f;
 		float worst = 0.f;   // most negative error reached
 		int   flips = 0;     // heading-error sign crossings
+		int   banked_but_straight = 0;  // G1c pin, see comment above
 		const int steps = static_cast<int>(std::lround(12.f / dt));
 		for (int i = 0; i < steps; ++i) {
 			SteerCommand cmd = TurnCommand(error, 15.f);
 			cmd.dt_s = dt;
 			SteerResult r = Steer(env, state, cmd);
+			if (std::fabs(r.bank_angle_rad) > 0.05f &&
+			    std::fabs(r.turn_rate_rad_s) < 1e-4f) ++banked_but_straight;
 			const float prev = error;
 			error -= r.turn_rate_rad_s * dt;
 			if (prev * error < 0.f) ++flips;
 			worst = std::min(worst, error);
 		}
-		return std::tuple<float, float, int>{error, worst, flips};
+		return std::tuple<float, float, int, int>{error, worst, flips,
+		                                          banked_but_straight};
 	};
 
 	// MEASURED (task-5-fix-report.md), overshoot in rad on a 1.57 rad maneuver:
@@ -1308,11 +1335,15 @@ TEST(MyopicBank, BankedTurnDoesNotOvershoot)
 	// straight" contradiction this whole fix removed. It converges with dt to
 	// ~-0.020 rad, is a SINGLE lobe (one sign crossing, then monotone), and
 	// settles at ~1e-19.
-	for (float dt : {1.f / 16.f, 1.f / 30.f, 1.f / 60.f, 1.f / 120.f, 1.f / 480.f}) {
-		auto [final_err, worst, flips] = run(dt);
+	for (float dt : {1.f / 16.f, 1.f / 30.f, 1.f / 60.f,
+	                 1.f / 120.f, 1.f / 240.f, 1.f / 480.f}) {
+		auto [final_err, worst, flips, banked_but_straight] = run(dt);
 		EXPECT_GE(worst, -0.06f) << "banked turn overshot too far at dt=" << dt;
 		EXPECT_LE(flips, 1) << "banked turn oscillated at dt=" << dt;
 		EXPECT_NEAR(final_err, 0.f, 1e-3f) << "did not converge at dt=" << dt;
+		EXPECT_EQ(banked_but_straight, 0)
+			<< "frames claiming a banked flyer travelling in a straight line, "
+			   "at dt=" << dt;
 	}
 }
 
@@ -1422,4 +1453,117 @@ TEST(MyopicBank, ZeroGravityDoesNotAbolishYawAuthority)
 	EXPECT_NEAR(r.turn_rate_rad_s, float(env.aerial->max_yaw_rate), 1e-3f)
 		<< "yaw authority is the only bound that survives zero gravity";
 	EXPECT_TRUE(std::isfinite(r.turn_headroom));
+}
+
+// B1: the companion case the test above cannot reach. `ZeroGravityDoesNot-
+// AbolishYawAuthority` starts wings level, so it never enters the
+// `turn_follows_bank` path at all. Start from a SETTLED bank instead and then
+// remove gravity.
+//
+// `turn_follows_bank` hands the delivered turn rate to the bank whenever a bank
+// is being carried. At g = 0 the bank produces g*tan(phi)/v == 0 for every phi,
+// so without the `gravity > 0` conjunct the yaw command is discarded in favour
+// of a hard zero for the entire roll-out: measured 41 consecutive frames
+// (0.68 s) of exactly zero turn rate on a flyer rolled to 1.02 rad with
+// 4.0 rad/s of yaw available, and 4.30 rad of heading swept in 2 s against
+// 7.31 rad with the bank correctly ignored. The bank owns the turn only where
+// the bank can produce one.
+TEST(MyopicBank, SettledBankDoesNotVetoYawWhenGravityIsRemoved)
+{
+	Envelope env = AlbatrossLikeEnvelope();
+	SteerState state{};
+	const float v  = 15.f;
+	const float dt = 1.f / 60.f;
+
+	// Settle into a full banked turn at 1 g.
+	SteerResult r{};
+	for (int i = 0; i < 600; ++i) r = Steer(env, state, TurnCommand(+1.57f, v));
+	ASSERT_EQ(r.strategy, TurnStrategy::BANK);
+	ASSERT_NEAR(r.bank_angle_rad, std::acos(0.5f), 1e-3f);
+
+	// Same creature, same carried bank, now in free fall -- and with real yaw
+	// authority, which is the whole question.
+	env.aerial->max_yaw_rate = omega_rad_s{4.f};
+
+	int   banked_but_straight = 0;
+	float swept = 0.f;
+	for (int i = 0; i < 120; ++i) {          // 2 s
+		SteerCommand cmd = TurnCommand(+1.57f, v);
+		cmd.gravity_m_s2 = 0.f;
+		r = Steer(env, state, cmd);
+		if (std::fabs(r.bank_angle_rad) > 0.05f &&
+		    std::fabs(r.turn_rate_rad_s) < 1e-4f) ++banked_but_straight;
+		swept += std::fabs(r.turn_rate_rad_s) * dt;
+	}
+
+	EXPECT_EQ(banked_but_straight, 0)
+		<< "a bank that cannot produce a turn must not veto the yaw that can";
+	EXPECT_GT(swept, 6.5f)
+		<< "zero-g yaw authority (4 rad/s over 2 s) was thrown away";
+	EXPECT_NEAR(r.turn_rate_rad_s, 4.f, 1e-3f);
+	EXPECT_NEAR(r.bank_angle_rad, 0.f, 1e-6f) << "the bank still rolls out";
+}
+
+// F3: the reviewer measured a ~560x collapse in turn authority across g -> 0 and
+// proposed blending or flooring it. The collapse is a FIXTURE artefact: it holds
+// stall_speed fixed while sweeping gravity. In the real pipeline stall_speed
+// comes from the analysis run at that world's gravity, and level flight (L = W)
+// gives v_s ~ sqrt(g). Scale it as the pipeline would and the invariant appears:
+//
+//     a_lift = g * n(v) = g * (v/v_s)^2 = rho*S*CL_max*v^2/(2m)   -- exact, g-free
+//     a_lat  = g * sqrt(n^2 - 1) = sqrt(a_lift^2 - g^2)
+//
+// So the quantity that is gravity-invariant is the TOTAL LIFT ACCELERATION, and
+// this test pins that to 1e-3 relative. The lateral budget is what is left after
+// holding the creature up, so it RISES as g falls -- monotonically, by a factor
+// of 1.3 over a 6x gravity change, not 560x, and toward a_lift as its ceiling.
+// That is the physically correct behaviour and is asserted too, deliberately
+// rather than being papered over with a blend.
+TEST(MyopicBank, LiftAccelIsGravityInvariantWhenStallSpeedScales)
+{
+	const float v  = 10.f;
+	const float vs_1g = 8.f;     // stall speed measured at Earth gravity
+
+	// Read the lateral budget off the delivered rate: put the flyer deep in the
+	// v^2-limited band (n_max far away) with nominal yaw authority far above the
+	// budget, so the force budget is the only thing that can bind.
+	auto measure = [&](float g) {
+		Envelope env = DragonflyLikeEnvelope();
+		env.max_speed = velocity_m_s{20.f};
+		env.aerial->n_max        = 100.f;
+		env.aerial->max_yaw_rate = omega_rad_s{100.f};
+		// The pipeline's own scaling: v_s^2 = 2mg/(rho S CL_max).
+		env.aerial->stall_speed  = velocity_m_s{vs_1g * std::sqrt(g / 9.81f)};
+
+		SteerState state{};
+		SteerResult r{};
+		for (int i = 0; i < 600; ++i) {
+			SteerCommand cmd = TurnCommand(1.57f, v);
+			cmd.gravity_m_s2 = g;
+			r = Steer(env, state, cmd);
+		}
+		EXPECT_EQ(r.strategy, TurnStrategy::YAW) << "at g=" << g;
+		const float a_lat = r.turn_rate_rad_s * v;
+		return std::pair<float, float>{a_lat, std::sqrt(a_lat * a_lat + g * g)};
+	};
+
+	auto [lat_earth, lift_earth] = measure(9.81f);
+	auto [lat_mars,  lift_mars ] = measure(3.71f);
+	auto [lat_luna,  lift_luna ] = measure(1.62f);
+
+	// The invariant. rho*S*CL_max*v^2/(2m) = 9.81 * (10/8)^2 = 15.328 m/s^2.
+	const float expected_lift = 9.81f * (v / vs_1g) * (v / vs_1g);
+	for (auto [name, lift] : {std::pair<const char*, float>{"earth", lift_earth},
+	                          {"mars", lift_mars}, {"luna", lift_luna}}) {
+		EXPECT_NEAR(lift, expected_lift, 1e-3f * expected_lift)
+			<< "lift acceleration is not gravity-invariant on " << name;
+	}
+
+	// ...and the residue, in the physically correct direction: less weight to
+	// hold up leaves more lift for turning. No cliff.
+	EXPECT_GT(lat_mars, lat_earth);
+	EXPECT_GT(lat_luna, lat_mars);
+	EXPECT_LT(lat_luna, expected_lift);            // a_lift is the ceiling
+	EXPECT_LT(lat_luna, lat_earth * 1.5f)
+		<< "spread across a 6x gravity change must stay small, not 560x";
 }
