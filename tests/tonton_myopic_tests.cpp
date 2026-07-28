@@ -488,3 +488,74 @@ TEST(MyopicStability, DemandingMoreThanTheGaitSuggestsAChange)
 	SteerResult r = Steer(env, state, cmd);
 	EXPECT_TRUE(r.suggest_gait_change);
 }
+
+// All four tests above hold angle_error_rad == 0 and rely on TestEnvelope's
+// min_speed == 0, so u_turn and u_stall are structurally zero throughout and
+// only u_speed is ever exercised -- a stub computing solely u_speed would
+// pass every test above. These three pin down the turn and stall channels
+// specifically, since u_turn's numerator (turn_stop_bound, not turn_demand
+// or the delivered turn_rate) was the one real judgment call in this task.
+//
+// TestEnvelope: max_lateral_accel = 8 m/s^2, tau_linear = 0.25 s, max_speed
+// = 10 m/s. At speed = 5 m/s (comfortably inside max_speed, so u_speed = 0.5
+// cannot by itself drive stability negative): omega_max = 8/5 = 1.6 rad/s,
+// and turn_stop_bound = angle_error_rad / max(tau, dt) = angle_error_rad /
+// 0.25 = 4 * angle_error_rad (dt = 1/60 << tau here, so max(tau,dt) == tau).
+
+TEST(MyopicStability, TurnSaturationDrivesStabilityNegative)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 2.0f;  // turn_stop_bound = 8.0 rad/s
+	cmd.current_speed_m_s = 5.f;   // omega_max = 1.6 rad/s -> u_turn = 5.0
+	cmd.desired_speed_m_s = 5.f;   // u_speed = 0.5, alone cannot go negative
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	EXPECT_LT(r.turn_headroom, 0.f);
+	EXPECT_LT(r.stability, 0.f);
+	// Isolates the turn term as the cause: u_speed = 0.5 alone bottoms out
+	// at stability = 0.5 (positive), and TestEnvelope's min_speed == 0 keeps
+	// u_stall structurally zero, so only u_turn can explain a value this
+	// far negative. If u_turn were stubbed to 0, stability would be 0.5.
+	EXPECT_LT(r.stability, -1.f);
+}
+
+TEST(MyopicStability, TurnHeadroomVariesInNormalRegime)
+{
+	Envelope env = TestEnvelope();
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.2f;  // turn_stop_bound = 0.8 rad/s
+	cmd.current_speed_m_s = 5.f;   // omega_max = 1.6 rad/s -> u_turn = 0.5
+	cmd.desired_speed_m_s = 5.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	// If u_turn were stubbed to 0, turn_headroom would read exactly 1.0
+	// instead of ~0.5 -- outside this tolerance.
+	EXPECT_NEAR(r.turn_headroom, 0.5f, 0.05f);
+	EXPECT_GT(r.turn_headroom, 0.f);
+	EXPECT_LT(r.turn_headroom, 1.f);
+}
+
+TEST(MyopicStability, BelowMinSpeedDrivesStabilityNegative)
+{
+	Envelope env = TestEnvelope();
+	env.min_speed = velocity_m_s{3.f}; // e.g. a stall-limited flyer/shark
+	SteerState state{};
+
+	SteerCommand cmd;
+	cmd.angle_error_rad   = 0.f;   // keep u_turn structurally zero
+	cmd.current_speed_m_s = 1.f;   // below min_speed -> u_stall = 3/1 = 3
+	cmd.desired_speed_m_s = 1.f;
+	cmd.dt_s              = 1.f / 60.f;
+
+	SteerResult r = Steer(env, state, cmd);
+	// u_speed = 1/10 = 0.1 alone cannot explain a negative result -- if
+	// u_stall were stubbed to 0, stability would read 0.9 (positive).
+	EXPECT_LT(r.stability, 0.f);
+}
