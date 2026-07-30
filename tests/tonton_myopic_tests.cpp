@@ -188,7 +188,80 @@ counted_ptr<const Output> AnalyzeFresh(const std::string& filename,
     return holder.output;
 }
 
+// ---------------------------------------------------------------------------
+// A RUNNING_TAKEOFF flyer, which the sample set no longer contains.
+//
+// Once the takeoff classifier stopped gating VERTICAL_LAUNCH on an absolute
+// power-to-weight threshold, dragonfly.glb classifies VERTICAL_LAUNCH -- which
+// is what TakeoffMode's own comment says a dragonfly is ("hummingbird,
+// dragonfly"). Nothing else fills the gap: RUNNING_TAKEOFF needs
+// wing_loading >= 25 N/m2, and every sample configuration reaching that loading
+// has already lost can_sustain_level_flight, which PlanLaunch refuses outright
+// with CANNOT_SUSTAIN_FLIGHT. Verified by sweeping dragonfly scale 2.0-4.0 at
+// both muscle-quality extremes: the two windows do not overlap anywhere.
+//
+// That non-overlap is itself suspicious -- it is the same flight-power model
+// that asks 597 W of a 1.9 kg bat -- but it is not this fixture's job to fix.
+//
+// So the runway arm runs on a REAL analysis with exactly ONE field overridden.
+// Stall speed, terrestrial envelope, jump figures, substrate handling and every
+// power number stay as computed. If a sample ever classifies RUNNING_TAKEOFF
+// and sustains flight, delete this and point the tests back at it.
+// ---------------------------------------------------------------------------
+const Output* RunningTakeoffFlyer()
+{
+    static std::deque<AnalysisHolder> store;
+    static const Output* cached = nullptr;
+    static bool tried = false;
+    if (tried) return cached;
+    tried = true;
+
+    store.emplace_back();
+    auto owned = AnalyzeFresh(kLaunchFlyer, MakeDefaultInput(Env::Air), store.back());
+    if (!owned) return nullptr;
+    if (!owned->aerial.has_value()) return nullptr;
+
+    const_cast<Output*>(owned.get())->aerial->takeoff.mode =
+        Analysis_TakeoffAnalysis::TakeoffMode::RUNNING_TAKEOFF;
+
+    cached = owned.get();
+    return cached;
+}
+
 } // namespace
+
+// The classifier fix itself: a dragonfly launches vertically. It used to be
+// told it needed a runway, because `power_to_weight_W_kg > 150` is a
+// size-dependent cutoff and this insect sits at 74.5 W/kg -- while clearing its
+// own force margin by 198x and paying only 23% of its burst budget to hover.
+TEST(MyopicLaunch, DragonflyLaunchesVertically)
+{
+	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	ASSERT_NE(out, nullptr);
+	ASSERT_TRUE(out->aerial.has_value());
+	EXPECT_EQ(out->aerial->takeoff.mode,
+	          Analysis_TakeoffAnalysis::TakeoffMode::VERTICAL_LAUNCH);
+	EXPECT_LE(out->aerial->takeoff.takeoff_power_fraction, 1.f)
+		<< "it can pay for its own hover, which is what the gate now asks";
+
+	MyopicInput in;
+	in.mode        = LocomotionMode::TERRESTRIAL;
+	in.target_mode = LocomotionMode::AERIAL;
+	in.substrate   = Substrate::GROUND;
+
+	// No runway, no airspeed, no wind-up: standing on solid ground is enough.
+	LaunchPlan p = PlanLaunch(*out, in, 0.f);
+	EXPECT_TRUE(p.feasible);
+	EXPECT_NEAR(p.readiness, 1.f, 1e-6f);
+	EXPECT_EQ(p.blocking_reason, BlockingReason::NONE);
+	EXPECT_FALSE(p.accelerate_along_heading);
+
+	// ...but it is still standing on something. Open water is not something.
+	in.substrate = Substrate::WATER;
+	LaunchPlan wet = PlanLaunch(*out, in, 0.f);
+	EXPECT_FALSE(wet.feasible);
+	EXPECT_EQ(wet.blocking_reason, BlockingReason::NEEDS_SOLID_SUBSTRATE);
+}
 
 TEST(MyopicEnvelope, TerrestrialGaitsAreOrdered)
 {
@@ -679,7 +752,7 @@ float ExpectedMaxAccel(const Output& o)
 {
 	const auto& a = *o.aerial;
 	const float surplus = std::max(0.f,
-		float(o.metabolic.available_muscle_power_W)
+		float(o.metabolic.sustained_muscle_power_W)
 		- float(a.flapping_power_mechanical_W));
 	return surplus / (float(o.physical.body_mass_kg) * float(a.cruise_speed_m_s));
 }
@@ -1677,24 +1750,21 @@ float SimulateEntryPointHeading(const Output& analysis, float dt, float t_end_s,
 
 // --- Launch planning -------------------------------------------------------
 
-// The plan asserted "a hovering insect launches vertically" and expected
-// readiness == 1 from a standstill. The analysis layer disagrees: dragonfly.glb
-// classifies as RUNNING_TAKEOFF, with a takeoff run of 0.020 m against a
-// minimum flight speed of 2.631 m/s. Two centimetres of runway IS morally a
-// vertical launch, so the numbers are not absurd -- but the MODE is what
-// PlanLaunch dispatches on, and reporting a launch the analysis did not
-// classify would be inventing biology at the control layer. Pinned so the
-// disagreement stays visible instead of being smoothed over.
-TEST(MyopicLaunch, DragonflyIsClassifiedRunningTakeoffNotVerticalLaunch)
+// The progression a runway launch goes through: refused-but-feasible at zero
+// airspeed, proportional in the middle, cleared at stall speed.
+//
+// This used to read dragonfly.glb directly, back when the classifier's absolute
+// power-to-weight gate misfiled a hovering insect as RUNNING_TAKEOFF. The
+// classifier is fixed (see DragonflyLaunchesVertically) and no sample fills the
+// mode any more, so it runs on RunningTakeoffFlyer() -- the same analysis with
+// only `mode` overridden.
+TEST(MyopicLaunch, RunningTakeoffProgressesWithAirspeed)
 {
-	const Output* out = Analyze("dragonfly.glb", Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	ASSERT_TRUE(out->aerial.has_value());
 	ASSERT_EQ(out->aerial->takeoff.mode,
-	          Analysis_TakeoffAnalysis::TakeoffMode::RUNNING_TAKEOFF)
-		<< "if this ever becomes VERTICAL_LAUNCH the expectations below are wrong";
-	EXPECT_LT(float(out->aerial->takeoff.takeoff_run_distance_m), 0.05f)
-		<< "the 'runway' the analysis asks for is 2 cm";
+	          Analysis_TakeoffAnalysis::TakeoffMode::RUNNING_TAKEOFF);
 
 	MyopicInput in;
 	in.mode        = LocomotionMode::TERRESTRIAL;
@@ -1741,7 +1811,7 @@ TEST(MyopicLaunch, NonFlyerReportsNoAerialAnalysis)
 // reach saturation, not merely fail to fall.
 TEST(MyopicLaunch, ReadinessIsMonotoneAndActuallyRisesWithAirspeed)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	ASSERT_TRUE(out->aerial.has_value());
 	ASSERT_EQ(out->aerial->takeoff.mode,
@@ -1773,7 +1843,7 @@ TEST(MyopicLaunch, ReadinessIsMonotoneAndActuallyRisesWithAirspeed)
 
 TEST(MyopicLaunch, RunningTakeoffNeedsARunwaySubstrate)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
 
@@ -1822,7 +1892,7 @@ TEST(MyopicLaunch, ImpossibleTakeoffReportsItsFirstFailedConstraint)
 // module, so it gets its own test.
 TEST(MyopicAirspeed, HeadwindMakesLaunchEasierThanTailwind)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 
 	MyopicState st_head{}, st_tail{};
@@ -1855,7 +1925,7 @@ TEST(MyopicAirspeed, HeadwindMakesLaunchEasierThanTailwind)
 
 TEST(MyopicAirspeed, StillAirReadinessSitsBetweenHeadAndTailwind)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -2501,8 +2571,9 @@ LaunchRunResult SimulateLaunchRun(const Output& o, int gait, int frames = 3000,
 // ThePromiseAndTheDeliveryAgree below; see kLaunchFlyer.
 TEST(MyopicLaunch, LaunchRunReachesFullReadiness)
 {
-	for (const char* file : {kLaunchFlyer}) {
-		const Output* out = Analyze(file, Env::Air);
+	{
+		const char* file = kLaunchFlyer;
+		const Output* out = RunningTakeoffFlyer();
 		ASSERT_NE(out, nullptr) << file;
 		ASSERT_TRUE(out->aerial.has_value()) << file;
 		ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF) << file;
@@ -2530,7 +2601,7 @@ TEST(MyopicLaunch, LaunchRunReachesFullReadiness)
 // unreachable at this gait.
 TEST(MyopicLaunch, AGaitThatCannotReachFlightSpeedSaysSo)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 
 	const float required = float(out->aerial->min_flight_speed_m_s);
@@ -2559,7 +2630,7 @@ TEST(MyopicLaunch, AGaitThatCannotReachFlightSpeedSaysSo)
 // at flight speed flew straight past its target.
 TEST(MyopicLaunch, SteeringResumesOnceTheLaunchPreconditionIsMet)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -2684,7 +2755,7 @@ TEST(MyopicFrame, TailwindDoesNotEraseARunnersGripBudget)
 // still move readiness.
 TEST(MyopicFrame, LaunchReadinessStaysAnAirspeedEvenFromTheGround)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	const float v_min = float(out->aerial->min_flight_speed_m_s);
 
@@ -2876,7 +2947,7 @@ TEST(MyopicFramerate, StabilityIsFramerateIndependent)
 // speed at R and pushes the airspeed to R -/+ 3.
 TEST(MyopicLaunch, WindAlongTheRunwayShiftsGroundSpeedNotAirspeed)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	ASSERT_TRUE(out->aerial.has_value());
 	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
@@ -2918,7 +2989,7 @@ TEST(MyopicLaunch, WindAlongTheRunwayShiftsGroundSpeedNotAirspeed)
 // caller's, here the gait's own top speed.
 TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	const float R = float(out->aerial->min_flight_speed_m_s);
 
@@ -2958,7 +3029,7 @@ TEST(MyopicLaunch, AHeadwindStrongerThanTheRequirementHandsBackTheSpeedChannel)
 // the case that distinguishes them.
 TEST(MyopicLaunch, TheLaunchRequirementIsAFloorNotACeiling)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	const float R = float(out->aerial->min_flight_speed_m_s);
 
@@ -3246,7 +3317,7 @@ TEST(MyopicEntryPoint, ForwardsTheRequiredDrop)
 // (keep going) versus standing somewhere it can never take off from (give up).
 TEST(MyopicEntryPoint, LaunchFeasibilityIsNotTheSameFactAsTheBlockingReason)
 {
-	const Output* out = Analyze(kLaunchFlyer, Env::Air);
+	const Output* out = RunningTakeoffFlyer();
 	ASSERT_NE(out, nullptr);
 	ASSERT_EQ(out->aerial->takeoff.mode, TakeoffMode::RUNNING_TAKEOFF);
 	ASSERT_FALSE(out->aerial->takeoff.can_use_water_taxi);
@@ -3457,14 +3528,16 @@ TEST(MyopicEnvelope, SerpentineInvariants)
 // J1: the first fix mirrored the AERIAL arm syntactically -- muscle power minus
 // the cruise cost -- but that is not the same OPERATION. Aerial subtracts a real
 // aerodynamic DEMAND derived independently of muscle power (184% of it for the
-// bat, which correctly zeroes the surplus). Both aquatic power figures are
-// BUDGET ALLOCATIONS of the same available_muscle_power_W, so
-// `muscle - 0.08*muscle` was a fixed 0.92*muscle on every sample forever, and it
-// assumed 2.3x the budget the burst SPEED bounding the same envelope came from.
-// The arm now spends out of the burst budget: 0.4*muscle - 0.08*muscle.
+// bat, which correctly zeroes the surplus). Both aquatic power figures were once
+// BUDGET ALLOCATIONS of the same muscle power, so `muscle - 0.08*muscle` was a
+// fixed 0.92*muscle on every sample forever, and it assumed 2.3x the budget the
+// burst SPEED bounding the same envelope came from. The arm now spends out of
+// the burst budget. Since the sustained/burst split, cruise and burst draw on
+// genuinely DIFFERENT budgets (aerobic-limited vs muscle-limited), so their
+// difference is a real headroom rather than a fraction of one supply.
 //
-// J4: the PROVENANCE of both exported fields is pinned against
-// available_muscle_power_W directly, not recomputed from the fields themselves.
+// J4: the PROVENANCE of both exported fields is pinned against the metabolic
+// budgets directly, not recomputed from the fields themselves.
 // Without that, rewiring either field to a different multiple of the muscle
 // power left the suite green, because the expectation was derived from the very
 // field under test.
@@ -3479,25 +3552,33 @@ TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
 		auto env = ExtractEnvelope(*out, LocomotionMode::AQUATIC, 0, 9.81f);
 		ASSERT_TRUE(env.has_value()) << file;
 
-		// --- J4: PROVENANCE, asserted against available_muscle_power_W --------
-		// Not "the field is smaller than the muscle power" (which 0.08, 0.4 and
-		// a rewired-by-mistake 0.9 all satisfy), but the exact allocation
-		// tonton_aquatic.cpp documents. Rewiring either field to the other's
-		// multiple must be a RED here, not a silently different envelope.
-		const float muscle = float(out->metabolic.available_muscle_power_W);
-		ASSERT_GT(muscle, 0.f) << file;
+		// --- J4: PROVENANCE, asserted against the metabolic budgets -----------
+		// Not "the field is smaller than the muscle power" (which many wrong
+		// wirings satisfy), but the exact allocation tonton_aquatic.cpp
+		// documents. Rewiring either field to the other's budget must be a RED
+		// here, not a silently different envelope.
+		const float burst_budget     = float(out->metabolic.burst_muscle_power_W);
+		const float sustained_budget = float(out->metabolic.sustained_muscle_power_W);
+		ASSERT_GT(burst_budget, 0.f) << file;
+		ASSERT_GT(sustained_budget, 0.f) << file;
 		ASSERT_GT(float(a.swim_power_mechanical_W), 0.f) << file;
 		ASSERT_GT(float(a.swim_power_burst_mechanical_W), 0.f) << file;
 
-		EXPECT_NEAR(float(a.swim_power_mechanical_W), 0.08f * muscle,
-		            1e-4f * muscle)
-			<< file << ": swim_power_mechanical_W is the 8% CRUISE allocation "
-			           "of available_muscle_power_W (tonton_aquatic.cpp)";
-		EXPECT_NEAR(float(a.swim_power_burst_mechanical_W), 0.4f * muscle,
-		            1e-4f * muscle)
-			<< file << ": swim_power_burst_mechanical_W is the 40% BURST "
-			           "allocation of available_muscle_power_W, and is the same "
-			           "budget burst_speed_m_s is derived from";
+		EXPECT_NEAR(float(a.swim_power_mechanical_W), sustained_budget,
+		            1e-4f * sustained_budget)
+			<< file << ": cruising is sustainable by definition, so "
+			           "swim_power_mechanical_W IS the aerobic-limited budget "
+			           "(tonton_aquatic.cpp) -- not a fraction of burst power";
+		EXPECT_NEAR(float(a.swim_power_burst_mechanical_W), 0.4f * burst_budget,
+		            1e-4f * burst_budget)
+			<< file << ": swim_power_burst_mechanical_W is the 40% recruitment "
+			           "fraction of burst_muscle_power_W, and is the same budget "
+			           "burst_speed_m_s is derived from";
+
+		// The split is the whole point: on a large ectotherm these differ by
+		// orders of magnitude. If they ever collapse to one number, the aerobic
+		// cap has been bypassed again.
+		EXPECT_LE(sustained_budget, burst_budget) << file;
 
 		// --- J1: the surplus is spent out of the BURST budget -----------------
 		// max_speed is burst_speed_m_s, which tonton_aquatic.cpp derives from
@@ -3509,7 +3590,8 @@ TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
 		const float expect = surplus / (float(out->physical.body_mass_kg)
 		                              * float(a.cruise_speed_m_s));
 
-		std::cerr << "[c1 " << file << "] muscle=" << muscle
+		std::cerr << "[c1 " << file << "] burst_budget=" << burst_budget
+		          << "W sustained_budget=" << sustained_budget
 		          << "W cruise_mech=" << float(a.swim_power_mechanical_W)
 		          << "W burst_mech=" << float(a.swim_power_burst_mechanical_W)
 		          << "W metabolic_max=" << float(out->metabolic.max_rate_W)
@@ -3524,7 +3606,7 @@ TEST(MyopicEnvelope, AquaticAccelerationIsAMechanicalSurplus)
 		// ...and specifically NOT the 0.92*muscle the pre-J1 arm computed. That
 		// value is 2.3x this one on every sample, so the assertion above is not
 		// two formulas agreeing by accident.
-		const float pre_j1 = (muscle - float(a.swim_power_mechanical_W))
+		const float pre_j1 = (burst_budget - float(a.swim_power_mechanical_W))
 		                   / (float(out->physical.body_mass_kg)
 		                    * float(a.cruise_speed_m_s));
 		EXPECT_GT(pre_j1, float(env->max_accel) * 2.f)

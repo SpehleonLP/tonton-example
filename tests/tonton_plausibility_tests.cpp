@@ -228,6 +228,20 @@ TEST_P(Invariants, ModelLoadsAndIsSane)
     EXPECT_LT(f(met.muscle_mass_kg), f(phys.body_mass_kg))
         << mc.label << ": muscle mass exceeds body mass";
 
+    // Sustained mechanical output cannot exceed either the muscle that produces
+    // it or the metabolism that funds it. Before the sustained/burst split there
+    // was ONE "available" figure and it broke the second bound by 7x (penguin),
+    // 38x (eel) and 100x (shark) -- every consumer that wanted a cruise budget
+    // was silently handed an anaerobic one.
+    EXPECT_GT(f(met.burst_muscle_power_W), 0.0) << mc.label;
+    EXPECT_GT(f(met.sustained_muscle_power_W), 0.0) << mc.label;
+    EXPECT_LE(f(met.sustained_muscle_power_W), f(met.burst_muscle_power_W))
+        << mc.label << ": sustained mechanical power exceeds peak muscle output";
+    EXPECT_LE(f(met.sustained_muscle_power_W), f(met.max_rate_W))
+        << mc.label << ": sustained mechanical power " << f(met.sustained_muscle_power_W)
+        << " W exceeds the whole-organism metabolic ceiling " << f(met.max_rate_W)
+        << " W that has to pay for it";
+
     // --- Diagnostics ---------------------------------------------------------
     EXPECT_GE(out->diagnostics.overall_confidence, 0.0f);
     EXPECT_LE(out->diagnostics.overall_confidence, 1.0f);
