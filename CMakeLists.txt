@@ -151,6 +151,46 @@ if(glm_FOUND)
 endif()
 
 # ============================================================================
+# chacha-integration-tests: GTest suite exercising the real ChaCha pipeline
+# against the ChaCha test corpus (treefrog/scorpion/sophia .glb models).
+#
+# Named distinctly from "chacha-tests" because that name is already taken by
+# ChaCha's own unit-test target once add_subdirectory(${CHACHA_DIR}) has run
+# above -- CMake would otherwise error on a duplicate target name.
+# ============================================================================
+option(CHACHA_BUILD_INTEGRATION_TESTS "Build the ChaCha integration test suite" ON)
+
+if(CHACHA_BUILD_INTEGRATION_TESTS)
+    find_package(GTest QUIET)
+
+    if(NOT GTest_FOUND)
+        message(STATUS "GTest not found via find_package; skipping chacha-integration-tests target")
+    else()
+        enable_testing()
+
+        add_executable(chacha-integration-tests
+            tests/chacha_integration_tests.cpp
+            src/chacha_fxgltf_bridge.cpp
+        )
+        target_include_directories(chacha-integration-tests PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
+            ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
+            ${CHACHA_DIR}/include
+        )
+        target_link_libraries(chacha-integration-tests PRIVATE
+            chacha fx-gltf GTest::gtest GTest::gtest_main Threads::Threads)
+        if(glm_FOUND)
+            target_link_libraries(chacha-integration-tests PRIVATE glm::glm)
+        endif()
+        target_compile_definitions(chacha-integration-tests PRIVATE
+            CHACHA_TESTDATA_DIR="${CHACHA_DIR}/testdata")
+        include(GoogleTest)
+        gtest_discover_tests(chacha-integration-tests)
+    endif()
+endif()
+
+# ============================================================================
 # tonton-tests: GTest plausibility suite over the sample models
 # ============================================================================
 option(TONTON_BUILD_TESTS "Build the tonton plausibility test suite" ON)
