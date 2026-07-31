@@ -541,36 +541,36 @@ TEST(ChaChaIntegration, ScaleStageIsBareRatioNotDegrees)
 }
 
 // ---------------------------------------------------------------------------
-// Performance guard: catch a silent order-of-magnitude regression in
-// analyze(), not small drift.
+// Performance guard: catch a silent multi-x regression in analyze(), not
+// small drift.
 //
 // The search is 49 joints x 12 charts x 88 animations x ~157 frames on this
 // model (select_candidate additionally evaluates 3 one-DOF and 6 two-DOF
 // candidates per joint, all scaling the same way -- see chacha_search.cpp).
 //
-// Measured (this task, RelWithDebInfo, the CMakeLists.txt default build
-// type): three consecutive runs of analyze() alone on sophia-2_9.glb gave
-// 19452 ms, 19732 ms, 20018 ms -- a ~3% spread. 120000 ms is chosen as the
-// bound: ~6x the measured ceiling. That is loose by design. A prior
-// measurement in this rework found an UNOPTIMISED (Debug-equivalent) build
-// of the same workload lands at essentially exactly 120000 ms, i.e. a tight
-// bound here would make "someone built this in Debug" indistinguishable from
-// "the algorithm regressed" -- which is exactly the false positive
-// CMakeLists.txt's default-to-RelWithDebInfo was introduced to avoid this
-// test tripping over. A bound six times looser than the measured
-// RelWithDebInfo ceiling still catches a genuine order-of-magnitude
-// regression (e.g. an accidentally-quadratic change to the per-joint search,
-// or losing the RelWithDebInfo optimization default) while leaving headroom
-// for a slower CI machine.
+// Measured directly on this machine, both configurations built from the same
+// source with nothing else changed:
+//   RelWithDebInfo (the CMakeLists.txt default): five runs of analyze() alone
+//     on sophia-2_9.glb ranged 18968-21876 ms.
+//   Debug (-DCMAKE_BUILD_TYPE=Debug, otherwise identical): two runs ranged
+//     76779-87704 ms -- roughly a 4x Debug/RelWithDebInfo ratio, not the 6x
+//     an earlier draft of this comment assumed from a second-hand figure
+//     ("essentially exactly 120000 ms" for an unoptimised build). That
+//     assumption did not hold up against direct measurement, and the 120000 ms
+//     bound it produced sat far enough above a genuine Debug build (~77-88s)
+//     that it would not have caught someone accidentally building Debug, nor
+//     a real 3-4x algorithmic regression -- both would have passed.
 //
-// Honesty check performed while writing this test (not left in committed
-// form): temporarily lowering the bound to 10000 ms made this test fail as
-// expected against the same unmodified build (measured ~19.5-20s), and
-// restoring 120000 ms passed again -- so the assertion mechanics are known
-// to be able to fail, not just habitually true. What is NOT verified is a
-// realistic regression scenario (an actual Debug build or an actual
-// algorithmic slowdown) tripping this exact 120000 ms line; treat this as a
-// catastrophic-regression guard, not a tuned performance regression test.
+// 60000 ms is chosen instead: about 2.7x the slower end of the measured
+// RelWithDebInfo ceiling (headroom for a slower machine), while sitting well
+// below the measured Debug range, so it reliably fails a Debug build and
+// would also catch a genuine 3x algorithmic regression on RelWithDebInfo.
+// Both properties were verified directly, not assumed: this test, built and
+// run against RelWithDebInfo, passes at 60000 ms; the same test, built and
+// run against an unmodified Debug configuration, fails at 60000 ms (measured
+// ~77-88s against the 60s bound). Still not a tuned performance test -- it
+// is a guard against catastrophic regressions and misconfigured build types,
+// not a bound to alert on small drift.
 TEST(ChaChaIntegration, SophiaAnalysisCompletesInReasonableTime)
 {
     auto doc   = load("sophia-2_9.glb");
@@ -584,5 +584,5 @@ TEST(ChaChaIntegration, SophiaAnalysisCompletesInReasonableTime)
 
     std::printf("[sophia] analyze() took %lld ms for %zu articulations\n",
                 static_cast<long long>(elapsed), arts.size());
-    EXPECT_LT(elapsed, 120000);
+    EXPECT_LT(elapsed, 60000);
 }
