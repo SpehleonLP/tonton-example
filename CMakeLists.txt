@@ -31,7 +31,8 @@ add_subdirectory(modules/rintintin)
 add_subdirectory(modules/tonton)
 
 # chacha - Joint articulation constraints from animation data
-add_subdirectory(modules/chacha)
+set(CHACHA_DIR "${CMAKE_SOURCE_DIR}/modules/chacha" CACHE PATH "Path to the chacha library source")
+add_subdirectory(${CHACHA_DIR} ${CMAKE_BINARY_DIR}/chacha-build)
 
 # ============================================================================
 # Gather source files for bridge libraries
@@ -128,7 +129,7 @@ target_include_directories(chacha-example PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/modules/fx-gltf/include
     ${CMAKE_SOURCE_DIR}/modules/fx-gltf/test/thirdparty
-    ${CMAKE_SOURCE_DIR}/modules/chacha/include
+    ${CHACHA_DIR}/include
     ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
 )
 

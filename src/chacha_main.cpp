@@ -1,7 +1,6 @@
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
-#include <unordered_map>
 #include <cxxopts.hpp>
 #include "fx/gltf.h"
 #include "chacha.h"
@@ -19,10 +18,16 @@ static bool OpenFile(fx::gltf::Document& doc, const std::filesystem::path& path)
     std::string ext = path.extension().string();
     for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
+    // Default fx::gltf quotas cap file/buffer size at 32MB, which some real
+    // production models exceed; raise the ceiling for this offline tool.
+    fx::gltf::ReadQuotas quotas;
+    quotas.MaxFileSize = 512u * 1024u * 1024u;
+    quotas.MaxBufferByteLength = 512u * 1024u * 1024u;
+
     if (ext == ".gltf")
-        doc = fx::gltf::LoadFromText(path);
+        doc = fx::gltf::LoadFromText(path, quotas);
     else if (ext == ".glb")
-        doc = fx::gltf::LoadFromBinary(path);
+        doc = fx::gltf::LoadFromBinary(path, quotas);
     else
         throw std::runtime_error("Not a glTF file: " + path.string());
 
@@ -131,49 +136,14 @@ int main(int argc, char* argv[])
             return 2;
         }
 
-        // Find first skin
-        int skin_index = -1;
-        for (size_t i = 0; i < doc.nodes.size(); ++i) {
-            if (doc.nodes[i].skin >= 0 && doc.nodes[i].skin < static_cast<int>(doc.skins.size())) {
-                skin_index = doc.nodes[i].skin;
-                break;
-            }
-        }
-        if (skin_index < 0 && !doc.skins.empty())
-            skin_index = 0;
-
-        if (skin_index < 0) {
-            std::cerr << "Error: No skin/skeleton found in " << input_path << "\n"
-                      << "ChaCha requires a skeleton to analyze animation data.\n";
-            return 2;
-        }
-
-        // Extract data
+        // Extract data (node space: AGI articulations are per node, and
+        // glTF animation channels target nodes, not skin joints)
         auto extracted_anims = ChaChaFxGltf::extract_animation_channels(doc);
-        auto extracted_skel = ChaChaFxGltf::extract_skeleton(doc, skin_index);
+        auto extracted_skel  = ChaChaFxGltf::extract_skeleton(doc);
 
         if (extracted_anims.channels.empty()) {
             std::cerr << "Error: No usable animation channels found.\n"
                       << "Channels must target rotation, translation, or scale.\n";
-            return 2;
-        }
-
-        // Remap channel node indices from glTF global to skeleton-local joint indices
-        std::unordered_map<uint32_t, int> node_to_joint;
-        for (size_t i = 0; i < extracted_skel.joint_nodes.size(); ++i)
-            node_to_joint[extracted_skel.joint_nodes[i]] = static_cast<int>(i);
-
-        std::vector<ChaCha::AnimationChannel> remapped_channels;
-        remapped_channels.reserve(extracted_anims.channels.size());
-        for (auto ch : extracted_anims.channels) {
-            auto it = node_to_joint.find(static_cast<uint32_t>(ch.node));
-            if (it == node_to_joint.end()) continue; // channel targets a non-skeleton node
-            ch.node = it->second;
-            remapped_channels.push_back(ch);
-        }
-
-        if (remapped_channels.empty()) {
-            std::cerr << "Error: No animation channels target skeleton joints.\n";
             return 2;
         }
 
@@ -182,10 +152,18 @@ int main(int argc, char* argv[])
         chacha_opts.rotation_threshold_rad = result["rotation-threshold"].as<float>();
         chacha_opts.translation_threshold_m = result["translation-threshold"].as<float>();
 
+        std::vector<ChaCha::Diagnostic> diagnostics;
         auto articulations = ChaCha::analyze(
-            std::span<const ChaCha::AnimationChannel>(remapped_channels),
+            extracted_anims.channels,
+            extracted_anims.animations,
             extracted_skel.as_skeleton(),
-            chacha_opts);
+            chacha_opts,
+            {},
+            &diagnostics);
+
+        for (const auto& d : diagnostics)
+            std::cerr << "warning: node " << d.node << " animation " << d.animation
+                      << " kind " << static_cast<int>(d.kind) << "\n";
 
         if (articulations.empty()) {
             std::cerr << "Error: No articulations produced.\n"
@@ -202,12 +180,12 @@ int main(int argc, char* argv[])
         // Output
         if (stdout_mode) {
             ChaChaFxGltf::print_articulations_json(
-                std::cout, doc, articulations, extracted_skel.joint_nodes);
+                std::cout, doc, articulations);
             return 0;
         }
 
         // Write extension to document
-        ChaChaFxGltf::write_agi_articulations(doc, articulations, extracted_skel.joint_nodes);
+        ChaChaFxGltf::write_agi_articulations(doc, articulations);
 
         // Remove AGI_ prefix animations
         ChaChaFxGltf::remove_agi_animations(doc);

@@ -23,7 +23,16 @@ struct ExtractedAnimations {
     // Channels referencing the storage above
     std::vector<ChaCha::AnimationChannel> channels;
 
-    // Indices of animations with AGI_ prefix (for later removal)
+    // Owned animation-name storage. Must be fully populated before any
+    // string_view into it is taken (see `animations` below), or
+    // reallocation invalidates every earlier view.
+    std::vector<std::string> name_storage;
+
+    // Animation descriptors referencing name_storage. Parallel to
+    // doc.animations (indexed by AnimationChannel::animation).
+    std::vector<ChaCha::Animation> animations;
+
+    // Indices of animations with AGI prefix (for later removal)
     std::unordered_set<uint32_t> agi_animation_indices;
 };
 
@@ -31,29 +40,31 @@ struct ExtractedSkeleton {
     std::vector<int> parents;
     std::vector<glm::quat> rest_rotations;
     std::vector<glm::vec3> rest_translations;
-
-    // Maps joint index (0..N-1) to glTF node index
-    std::vector<uint32_t> joint_nodes;
+    std::vector<glm::vec3> rest_scales;
 
     ChaCha::Skeleton as_skeleton() const;
 };
 
 // Extract animation channels from all animations in the document.
-// Channels reference nodes by glTF node index (not joint index).
-// Caller must remap to joint indices before calling ChaCha::analyze().
+// Channels reference nodes by glTF node index, and animations by index
+// into the returned ExtractedAnimations::animations array.
 ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc);
 
-// Extract skeleton from a skin. Returns joint hierarchy and rest poses.
-ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc, int skin_index);
+// Extract skeleton in glTF node space: arrays are sized to doc.nodes.size()
+// and indexed directly by node index. AGI articulations are per node and
+// animation channels target nodes, so this is node space, not skin-joint
+// space.
+ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc);
 
 // Write articulation results as AGI_articulations extension on the document.
-// Converts radians to degrees at the boundary.
+// Converts radians to degrees for rotation stages at the boundary.
 void write_agi_articulations(
     fx::gltf::Document& doc,
-    const std::vector<ChaCha::Articulation>& articulations,
-    const std::vector<uint32_t>& joint_nodes);
+    const std::vector<ChaCha::Articulation>& articulations);
 
-// Remove animations whose name starts with "AGI_" (case-insensitive).
+// Remove animations whose name starts with "AGI " (case-insensitive, note
+// the space -- authored configuration animations are named things like
+// "AGI Configuration", not "AGI_Configuration").
 // Also removes orphaned accessors and bufferViews via reference counting,
 // with full index remapping across the document.
 void remove_agi_animations(fx::gltf::Document& doc);
@@ -66,8 +77,7 @@ bool has_agi_articulations(const fx::gltf::Document& doc);
 void print_articulations_json(
     std::ostream& os,
     const fx::gltf::Document& doc,
-    const std::vector<ChaCha::Articulation>& articulations,
-    const std::vector<uint32_t>& joint_nodes);
+    const std::vector<ChaCha::Articulation>& articulations);
 
 } // namespace ChaChaFxGltf
 

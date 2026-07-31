@@ -1,4 +1,5 @@
 #include "chacha_fxgltf_bridge.h"
+#include "chacha_naming.h"
 #include "fx/gltf.h"
 #include <nlohmann/json.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
@@ -38,10 +39,12 @@ namespace ChaChaFxGltf {
 // ---------------------------------------------------------------------------
 static bool starts_with_agi(const std::string& name)
 {
+    // Authored configuration animations are named things like
+    // "AGI Configuration" -- note the space, not an underscore.
     if (name.size() < 4) return false;
     auto prefix = name.substr(0, 4);
     for (auto& c : prefix) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return prefix == "agi_";
+    return prefix == "agi ";
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +53,14 @@ static bool starts_with_agi(const std::string& name)
 ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
 {
     ExtractedAnimations result;
+
+    // Build owned name storage COMPLETELY before taking any string_view into
+    // it -- reallocation would dangle every earlier view otherwise.
+    result.name_storage.reserve(doc.animations.size());
+    for (const auto& a : doc.animations)
+        result.name_storage.push_back(a.name);
+    for (const auto& s : result.name_storage)
+        result.animations.push_back(ChaCha::Animation{s});
 
     for (uint32_t anim_idx = 0; anim_idx < doc.animations.size(); ++anim_idx) {
         const auto& anim = doc.animations[anim_idx];
@@ -119,6 +130,7 @@ ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
 
             ChaCha::AnimationChannel ch;
             ch.node = channel.target.node;
+            ch.animation = static_cast<int>(anim_idx);
             ch.property = prop;
             ch.interp = interp;
             ch.times = std::span<const float>(result.time_storage.back());
@@ -133,44 +145,26 @@ ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
 // ---------------------------------------------------------------------------
 // extract_skeleton
 // ---------------------------------------------------------------------------
-ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc, int skin_index)
+ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc)
 {
     ExtractedSkeleton result;
+    const size_t n = doc.nodes.size();
 
-    if (skin_index < 0 || skin_index >= static_cast<int>(doc.skins.size()))
-        throw std::invalid_argument("Invalid skin index");
+    result.parents.assign(n, -1);
+    result.rest_rotations.assign(n, glm::quat(1, 0, 0, 0));
+    result.rest_translations.assign(n, glm::vec3(0));
+    result.rest_scales.assign(n, glm::vec3(1));
 
-    const auto& skin = doc.skins[skin_index];
-    const size_t joint_count = skin.joints.size();
-    if (joint_count == 0)
-        throw std::invalid_argument("Skin has no joints");
-
-    result.joint_nodes.assign(skin.joints.begin(), skin.joints.end());
-    result.parents.resize(joint_count, -1);
-    result.rest_rotations.resize(joint_count, glm::quat(1, 0, 0, 0));
-    result.rest_translations.resize(joint_count, glm::vec3(0));
-
-    // Build node-to-joint map
-    std::unordered_map<uint32_t, int> node_to_joint;
-    for (size_t i = 0; i < joint_count; ++i)
-        node_to_joint[skin.joints[i]] = static_cast<int>(i);
-
-    // Build parent array from node.children
-    for (size_t i = 0; i < joint_count; ++i) {
-        const auto& node = doc.nodes[skin.joints[i]];
-        for (auto child : node.children) {
-            auto it = node_to_joint.find(child);
-            if (it != node_to_joint.end())
-                result.parents[it->second] = static_cast<int>(i);
-        }
-    }
+    for (size_t i = 0; i < n; ++i)
+        for (auto child : doc.nodes[i].children)
+            if (child < n) result.parents[child] = static_cast<int>(i);
 
     // Extract rest poses from node-local TRS.
     // Animation channels store local-space values, so rest poses must also
     // be local-space for correct rest-relative subtraction in ChaCha.
     // (Inverse bind matrices give mesh-space poses — wrong basis for this.)
-    for (size_t i = 0; i < joint_count; ++i) {
-        const auto& node = doc.nodes[skin.joints[i]];
+    for (size_t i = 0; i < n; ++i) {
+        const auto& node = doc.nodes[i];
 
         if (node.matrix != fx::gltf::defaults::IdentityMatrix) {
             glm::mat4 mat;
@@ -179,8 +173,9 @@ ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc, int skin_index
             glm::quat rotation;
             glm::vec4 perspective;
             glm::decompose(mat, scale, rotation, translation, skew, perspective);
-            result.rest_rotations[i] = rotation;
+            result.rest_rotations[i]    = rotation;
             result.rest_translations[i] = translation;
+            result.rest_scales[i]       = scale;
         } else {
             // glTF rotation is [x,y,z,w], glm::quat constructor is (w,x,y,z)
             result.rest_rotations[i] = glm::quat(
@@ -188,6 +183,8 @@ ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc, int skin_index
                 node.rotation[1], node.rotation[2]);
             result.rest_translations[i] = glm::vec3(
                 node.translation[0], node.translation[1], node.translation[2]);
+            result.rest_scales[i] = glm::vec3(
+                node.scale[0], node.scale[1], node.scale[2]);
         }
     }
 
@@ -200,6 +197,7 @@ ChaCha::Skeleton ExtractedSkeleton::as_skeleton() const
         .parents = std::span<const int>(parents),
         .rest_rotations = std::span<const glm::quat>(rest_rotations),
         .rest_translations = std::span<const glm::vec3>(rest_translations),
+        .rest_scales = std::span<const glm::vec3>(rest_scales),
     };
 }
 
@@ -234,50 +232,49 @@ static constexpr float rad_to_deg = 180.0f / 3.14159265358979323846f;
 
 void write_agi_articulations(
     fx::gltf::Document& doc,
-    const std::vector<ChaCha::Articulation>& articulations,
-    const std::vector<uint32_t>& joint_nodes)
+    const std::vector<ChaCha::Articulation>& articulations)
 {
     nlohmann::json agi_array = nlohmann::json::array();
+    std::vector<std::string> taken_names;
 
     for (const auto& artic : articulations) {
-        // Resolve node index
-        uint32_t node_idx = (artic.node >= 0 && artic.node < static_cast<int>(joint_nodes.size()))
-            ? joint_nodes[artic.node]
-            : static_cast<uint32_t>(artic.node);
+        const uint32_t node_idx = static_cast<uint32_t>(artic.node);
+        std::string source = (node_idx < doc.nodes.size() && !doc.nodes[node_idx].name.empty())
+            ? doc.nodes[node_idx].name
+            : ("joint_" + std::to_string(artic.node));
+        const std::string name = ChaCha::sanitize_articulation_name(source, taken_names);
 
-        // Determine name: prefer node name from document
-        std::string name;
-        if (node_idx < doc.nodes.size() && !doc.nodes[node_idx].name.empty())
-            name = doc.nodes[node_idx].name;
-        else if (!artic.name.empty())
-            name = artic.name;
-        else
-            name = "joint_" + std::to_string(artic.node);
-
-        // Build stages array
+        // Build stages array. Stage types CAN repeat within one articulation
+        // (proper-Euler charts with a repeated axis) -- track occurrence per
+        // slot rather than deduplicating by type, and preserve slot order
+        // exactly since AGI applies stages in order of appearance.
         nlohmann::json stages_json = nlohmann::json::array();
+        int occurrence[9] = {0,0,0,0,0,0,0,0,0};
+
         for (const auto& stage : artic.stages) {
-            float conv = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
-            float vel_conv = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
+            const int   slot  = static_cast<int>(stage.type);
+            const int   occur = occurrence[slot]++;
+            const float conv  = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
 
             nlohmann::json sj;
-            sj["type"] = stage_type_to_agi_type(stage.type);
-            sj["minimumValue"] = stage.min_value * conv;
-            sj["maximumValue"] = stage.max_value * conv;
+            sj["name"]         = ChaCha::stage_name_for(stage.type, occur);
+            sj["type"]         = stage_type_to_agi_type(stage.type);
+            sj["minimumValue"] = stage.min_value     * conv;
+            sj["maximumValue"] = stage.max_value     * conv;
             sj["initialValue"] = stage.initial_value * conv;
             if (stage.max_velocity > 0)
-                sj["maximumSpeed"] = stage.max_velocity * vel_conv;
-            if (stage.max_effort > 0)
-                sj["maximumEffort"] = stage.max_effort;
+                sj["extras"]["chachaMaximumSpeed"] = stage.max_velocity * conv;
+            if (stage.max_acceleration > 0)
+                sj["extras"]["chachaMaximumAcceleration"] = stage.max_acceleration * conv;
             stages_json.push_back(sj);
         }
 
         nlohmann::json entry;
-        entry["name"] = name;
-        entry["stages"] = stages_json;
-        if (artic.node >= 0 && artic.node < static_cast<int>(joint_nodes.size()))
-            entry["pointingVector"] = {0, 0, 1}; // default forward
-
+        entry["name"]           = name;
+        entry["stages"]         = stages_json;
+        entry["pointingVector"] = {artic.pointing_vector.x,
+                                   artic.pointing_vector.y,
+                                   artic.pointing_vector.z};
         agi_array.push_back(entry);
 
         // Set node-level extension
@@ -481,40 +478,41 @@ bool has_agi_articulations(const fx::gltf::Document& doc)
 void print_articulations_json(
     std::ostream& os,
     const fx::gltf::Document& doc,
-    const std::vector<ChaCha::Articulation>& articulations,
-    const std::vector<uint32_t>& joint_nodes)
+    const std::vector<ChaCha::Articulation>& articulations)
 {
     nlohmann::json root = nlohmann::json::array();
+    std::vector<std::string> taken_names;
 
     for (const auto& artic : articulations) {
         nlohmann::json entry;
 
-        // Resolve name from node if possible
-        uint32_t node_idx = (artic.node >= 0 && artic.node < static_cast<int>(joint_nodes.size()))
-            ? joint_nodes[artic.node]
-            : static_cast<uint32_t>(artic.node);
-        std::string name;
-        if (node_idx < doc.nodes.size() && !doc.nodes[node_idx].name.empty())
-            name = doc.nodes[node_idx].name;
-        else if (!artic.name.empty())
-            name = artic.name;
-        else
-            name = "joint_" + std::to_string(artic.node);
+        const uint32_t node_idx = static_cast<uint32_t>(artic.node);
+        std::string source = (node_idx < doc.nodes.size() && !doc.nodes[node_idx].name.empty())
+            ? doc.nodes[node_idx].name
+            : ("joint_" + std::to_string(artic.node));
+        const std::string name = ChaCha::sanitize_articulation_name(source, taken_names);
+
         entry["name"] = name;
         entry["node"] = artic.node;
-        if (artic.node >= 0 && artic.node < static_cast<int>(joint_nodes.size()))
-            entry["glTF_node"] = joint_nodes[artic.node];
 
         nlohmann::json stages_json = nlohmann::json::array();
+        int occurrence[9] = {0,0,0,0,0,0,0,0,0};
+
         for (const auto& stage : artic.stages) {
-            float conv = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
+            const int   slot  = static_cast<int>(stage.type);
+            const int   occur = occurrence[slot]++;
+            const float conv  = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
+
             nlohmann::json sj;
+            sj["name"] = ChaCha::stage_name_for(stage.type, occur);
             sj["type"] = stage_type_to_agi_type(stage.type);
             sj["min"] = stage.min_value * conv;
             sj["max"] = stage.max_value * conv;
             sj["initial"] = stage.initial_value * conv;
             if (stage.max_velocity > 0)
                 sj["maxSpeed"] = stage.max_velocity * conv;
+            if (stage.max_acceleration > 0)
+                sj["maxAcceleration"] = stage.max_acceleration * conv;
             stages_json.push_back(sj);
         }
         entry["stages"] = stages_json;
