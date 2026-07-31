@@ -131,38 +131,54 @@ TEST(ChaChaIntegration, TreefrogRestingJointsAreLocked)
         ++unanimated_checked;
     }
     // Measured: 84 nodes total, 82 animated -- so exactly 2 unanimated nodes
-    // exist to exercise the invariant above. If this drifts to 0 the test
-    // below is vacuous, so make that visible rather than silently passing.
-    ASSERT_GT(unanimated_checked, 0)
-        << "expected at least one unanimated node in treefrog.glb to exercise "
+    // exist to exercise the invariant above. Pinned exactly (not just ">0")
+    // so a corpus-file change that adds channels to one of them is visible
+    // rather than silently shrinking the population this test covers.
+    EXPECT_EQ(unanimated_checked, 2)
+        << "expected exactly 2 unanimated nodes in treefrog.glb to exercise "
            "the locked-joint invariant; corpus file may have changed";
 
     // The count itself: not a fraction of total nodes (that bound is false
     // per the measurement above) but the actual number of animated nodes
     // whose motion clears the noise threshold. 56 is the measured baseline
-    // for this exact corpus file with default Options; deriving it any more
-    // "structurally" than this would mean reimplementing the threshold
-    // logic (peak-to-peak deviation vs. rotation/translation/scale
-    // thresholds) here, which is exactly the kind of test that can never
-    // fail against a broken threshold. Bracket it against the channel-count
-    // upper bound (which we CAN derive from the document) and pin the exact
-    // measured count as a regression guard.
+    // for this exact corpus file with default Options.
+    //
+    // Honest caveat (found in review): this is the weakest regression guard
+    // in this suite. It survived a review mutation that raised
+    // rotation_threshold_rad 30x, because treefrog's translation and scale
+    // stages keep most of these 56 articulations' node populated regardless
+    // of what happens to the rotation threshold specifically -- so this
+    // number is dominated by translation/scale motion, not a precise probe
+    // of rotation-threshold behavior. Treat a break here as "something in
+    // extraction, node indexing, or the overall threshold pipeline changed,
+    // go look" rather than "the rotation threshold changed." Deriving 56 any
+    // more structurally would mean reimplementing the per-property
+    // peak-to-peak threshold comparison from chacha_analyzer.cpp here,
+    // which would just make this test fail in lockstep with the same bug
+    // instead of catching it.
     EXPECT_LE(a.articulations.size(), animated_nodes.size())
         << "cannot emit more articulations than nodes with any animation channel";
     EXPECT_EQ(a.articulations.size(), 56u)
         << "measured baseline for treefrog.glb with default Options; if this "
            "changes intentionally (threshold tuning, new stage types, etc.) "
-           "update the constant, but a silent drift here is a real regression";
+           "update the constant, but a silent drift here is worth investigating";
 }
 
 // ---------------------------------------------------------------------------
-// Ruling 3: pointing_vector is not a per-joint anatomical value.
-// infer_pointing_vectors votes for a single model-dominant bone axis, so the
-// only thing legitimately assertable is that the vote is applied uniformly
-// across every articulation in the document -- not a specific direction per
-// joint. If a future change accidentally made this per-joint (e.g. reusing
-// a per-node local axis instead of the model-wide vote), this test would
-// start failing on the very first divergent pair.
+// Ruling 3: pointing_vector is not a per-joint anatomical value to assert
+// per-joint. For THIS document, infer_pointing_vectors settles on a single
+// vector shared by every articulation -- that's the outcome this test pins.
+//
+// It is not a general design invariant, and the test does not claim one:
+// chacha_pointing.cpp has per-joint fallback loops (see lines ~125-164) for
+// when no axis clears the dominant-axis fraction, so a different model
+// could legitimately produce divergent per-joint pointing vectors without
+// that being a bug. Treefrog happens to converge on a single dominant axis
+// for all 56 articulations, so uniformity is what a correct run of THIS
+// document should produce; if a future change accidentally made the vote
+// per-joint when it should still be uniform here (e.g. reusing a per-node
+// local axis instead of the model-wide vote), this test would catch the
+// first divergent pair.
 // ---------------------------------------------------------------------------
 TEST(ChaChaIntegration, PointingVectorIsAModelWideVoteNotPerJoint)
 {
@@ -177,13 +193,39 @@ TEST(ChaChaIntegration, PointingVectorIsAModelWideVoteNotPerJoint)
                "per-joint value -- node " << art.node << " diverged";
 }
 
-TEST(ChaChaIntegration, ScorpionProducesArticulations)
+// ---------------------------------------------------------------------------
+// Scorpion is also where the reduced-DOF subsystem (the closed-form 1-DOF
+// solve, the Gauss-Newton 2-DOF solve, and the residual acceptance gate in
+// chacha_reduced.cpp/chacha_dp.cpp) gets exercised end-to-end. Before this
+// fix round, nothing in this suite asserted anything about DOF counts on
+// any model except sophia's trivial "at least one non-3-DOF-or-not" check
+// -- and sophia has zero reduced-DOF joints (see SophiaAnalysis), so the
+// entire reduced-DOF path could be deleted from the library and this suite
+// would stay green. Pinning scorpion's histogram closes that hole: it has
+// a real, measured mix of all three DOF counts.
+// ---------------------------------------------------------------------------
+TEST(ChaChaIntegration, ScorpionAnalysis)
 {
     auto doc = load("emporer scorpion.glb");
     auto a   = run(doc);
-    EXPECT_FALSE(a.articulations.empty());
+    ASSERT_FALSE(a.articulations.empty());
     // Measured baseline (see task-15 report): 45.
     EXPECT_EQ(a.articulations.size(), 45u);
+
+    int hist[4] = {0, 0, 0, 0};
+    for (const auto& art : a.articulations)
+        if (art.dof_count < 4) hist[art.dof_count]++;
+    std::printf("[scorpion] dof histogram 0/1/2/3 = %d/%d/%d/%d\n",
+                hist[0], hist[1], hist[2], hist[3]);
+    // Measured baseline (see task-15 report): 11 one-DOF, 16 two-DOF,
+    // 18 three-DOF. This is what actually exercises the reduced-DOF search
+    // path (11+16 = 27 of 45 articulations went through the 1-DOF/2-DOF
+    // candidate solve and residual gate, not just the always-exact 3-DOF
+    // chart fit).
+    EXPECT_EQ(hist[0], 0);
+    EXPECT_EQ(hist[1], 11);
+    EXPECT_EQ(hist[2], 16);
+    EXPECT_EQ(hist[3], 18);
 }
 
 // Sophia (mixamo rig, 41MB) takes roughly 17.7s per analyze() call in a
@@ -197,11 +239,17 @@ TEST(ChaChaIntegration, ScorpionProducesArticulations)
 // still names which property broke.
 //
 // 1) The objective correctness measure: applying the emitted stages at
-//    their solved angles must reproduce the original keyframes. Requires no
-//    anatomical ground truth.
+//    their solved angles must reproduce the original keyframes, within a
+//    bound tight enough to catch a dropped stage (fix round, Finding 1).
 // 2) Constant unit scale channels must not produce scale stages.
-// 3) The DOF histogram is reported (and at least one non-zero-DOF joint
-//    exists), which is also where fit_residual_rad gets surfaced.
+// 3) The DOF histogram is pinned exactly at 0/0/0/40 (fix round, Finding 2):
+//    sophia's mocap motion is genuinely all-3-DOF (confirmed in review --
+//    not a solver defect; see the histogram check's own comment), so this
+//    pins that specific, correct outcome rather than asserting something
+//    trivially true of any histogram. It does NOT exercise the reduced-DOF
+//    (1-DOF/2-DOF) search path -- that's pinned on scorpion instead, see
+//    ScorpionAnalysis, since sophia has no reduced-DOF joints to exercise it
+//    with.
 TEST(ChaChaIntegration, SophiaAnalysis)
 {
     auto doc = load("sophia-2_9.glb");
@@ -232,8 +280,14 @@ TEST(ChaChaIntegration, SophiaAnalysis)
         auto it = by_node.find(ch.node);
         if (it == by_node.end()) continue;
 
-        // Reachability check: the emitted axes must span the observed motion.
-        // A joint constrained to fewer axes than it moves in would show up here.
+        // Project the observed rest-relative rotation onto the emitted
+        // stage axes and measure what's left over. This bounds gross
+        // decomposition failure (see the EXPECT_LT below for how tight);
+        // it is NOT a general "missing axis" detector by itself -- a
+        // dropped stage still leaves the others to soak up some of the
+        // rotation, so the residual only blows up past a certain bound.
+        // The bound is chosen tight enough (1.5 rad) to actually catch a
+        // dropped-stage mutation; see the comment on that EXPECT_LT.
         const glm::quat rest_inv =
             glm::inverse(glm::normalize(a.skel.rest_rotations[ch.node]));
 
@@ -262,11 +316,16 @@ TEST(ChaChaIntegration, SophiaAnalysis)
     }
 
     EXPECT_GT(sampled, 1000);
-    // Reported rather than tightly asserted: mixamo rigs contain genuine
-    // three-axis motion at many joints, so this bounds gross failure only.
     std::printf("[sophia] sampled=%d worst residual=%.2f deg\n",
                 sampled, worst * 57.29577951);
-    EXPECT_LT(worst, 3.2);   // radians; anything near pi indicates a broken fit
+    // Measured worst residual on the real pipeline is ~1.19 rad (68.12 deg;
+    // mixamo rigs have genuine off-axis motion at several joints, so this is
+    // not near zero). 3.2 rad (the brief's original bound, essentially "not
+    // pi") is not discriminating: a mutation that drops 2 of the 3 stages
+    // from every articulation on every model still lands at ~3.1 rad and
+    // passes. 1.5 rad leaves real margin above the measured 1.19 rad while
+    // catching that mutation (verified: see task-15 report, fix round).
+    EXPECT_LT(worst, 1.5);
     }
 
     {
@@ -289,7 +348,20 @@ TEST(ChaChaIntegration, SophiaAnalysis)
     }
     std::printf("[sophia] dof histogram 0/1/2/3 = %d/%d/%d/%d, worst residual %.3f rad\n",
                 hist[0], hist[1], hist[2], hist[3], worst_conditioning_proxy);
-    EXPECT_GT(hist[1] + hist[2] + hist[3], 0);
+    // Sophia is genuinely all-3-DOF (measured and confirmed in review): this
+    // mixamo mocap rig carries real off-axis motion at every joint, not a
+    // solver defect -- the best 1-DOF residual anywhere in the rig (left
+    // elbow) is 0.741 rad against a 0.02 rad acceptance gate, nowhere close
+    // to passing. `EXPECT_GT(hist[1]+hist[2]+hist[3], 0)` would be trivially
+    // satisfied by hist[3] alone and catch nothing; pin the exact histogram
+    // instead so a regression that misclassifies DOF (in either direction)
+    // is visible here. The reduced-DOF path itself (1-DOF/2-DOF candidates)
+    // is exercised and pinned on scorpion instead, see ScorpionAnalysis --
+    // sophia has no reduced-DOF joints to pin.
+    EXPECT_EQ(hist[0], 0);
+    EXPECT_EQ(hist[1], 0);
+    EXPECT_EQ(hist[2], 0);
+    EXPECT_EQ(hist[3], 40);
     }
 }
 
@@ -380,9 +452,9 @@ TEST(ChaChaIntegration, RepeatedStageTypeGetsUniqueNamesInSlotOrder)
 // Synthetic: a genuine scale stage.
 //
 // None of the three corpus models produces a scale stage (sophia's scale
-// channels are constant unit scale and get filtered; see
-// SophiaConstantScaleChannelsProduceNoScaleStages above), so the bridge's
-// "scale is a bare multiplicative ratio, not degrees" branch
+// channels are constant unit scale and get filtered; see the "constant
+// scale channels produce no scale stages" check in SophiaAnalysis above),
+// so the bridge's "scale is a bare multiplicative ratio, not degrees" branch
 // (is_rotation_stage() gating the rad_to_deg conversion in
 // write_agi_articulations) is completely unexercised by real data. A
 // copy-paste bug applying the rotation conversion to scale stages too would
