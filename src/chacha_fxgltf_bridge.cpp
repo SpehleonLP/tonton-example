@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include <unordered_map>
 
 // Component/element byte sizes, needed to bounds-check the byte EXTENT an
 // accessor claims -- not just the index chain into bufferView/buffer.
@@ -99,19 +98,6 @@ struct AccessorData {
 namespace ChaChaFxGltf {
 
 // ---------------------------------------------------------------------------
-// Helper: case-insensitive prefix check
-// ---------------------------------------------------------------------------
-static bool starts_with_agi(const std::string& name)
-{
-    // Authored configuration animations are named things like
-    // "AGI Configuration" -- note the space, not an underscore.
-    if (name.size() < 4) return false;
-    auto prefix = name.substr(0, 4);
-    for (auto& c : prefix) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return prefix == "agi ";
-}
-
-// ---------------------------------------------------------------------------
 // extract_animation_channels
 // ---------------------------------------------------------------------------
 ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
@@ -128,9 +114,6 @@ ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
 
     for (uint32_t anim_idx = 0; anim_idx < doc.animations.size(); ++anim_idx) {
         const auto& anim = doc.animations[anim_idx];
-
-        if (starts_with_agi(anim.name))
-            result.agi_animation_indices.insert(anim_idx);
 
         for (const auto& channel : anim.channels) {
             if (channel.target.node < 0) continue;
@@ -392,204 +375,6 @@ void write_agi_articulations(
     auto& used = doc.extensionsUsed;
     if (std::find(used.begin(), used.end(), "AGI_articulations") == used.end())
         used.push_back("AGI_articulations");
-}
-
-// ---------------------------------------------------------------------------
-// remove_agi_animations
-// ---------------------------------------------------------------------------
-
-void remove_agi_animations(fx::gltf::Document& doc)
-{
-    // 1. Identify AGI_ animation indices
-    std::unordered_set<uint32_t> agi_indices;
-    for (uint32_t i = 0; i < doc.animations.size(); ++i) {
-        if (starts_with_agi(doc.animations[i].name))
-            agi_indices.insert(i);
-    }
-    if (agi_indices.empty()) return;
-
-    // 2. Build accessor refcount from ALL consumers
-    std::unordered_map<int32_t, int> accessor_refcount;
-
-    auto ref_accessor = [&](int32_t idx) {
-        if (idx >= 0) accessor_refcount[idx]++;
-    };
-    auto ref_accessor_u = [&](uint32_t idx) {
-        accessor_refcount[static_cast<int32_t>(idx)]++;
-    };
-
-    // All animation samplers
-    for (const auto& anim : doc.animations) {
-        for (const auto& sampler : anim.samplers) {
-            ref_accessor(sampler.input);
-            ref_accessor(sampler.output);
-        }
-    }
-    // Mesh primitives
-    for (const auto& mesh : doc.meshes) {
-        for (const auto& prim : mesh.primitives) {
-            ref_accessor(prim.indices);
-            for (const auto& [key, val] : prim.attributes)
-                ref_accessor_u(val);
-            for (const auto& target : prim.targets)
-                for (const auto& [key, val] : target)
-                    ref_accessor_u(val);
-        }
-    }
-    // Skins
-    for (const auto& skin : doc.skins)
-        ref_accessor(skin.inverseBindMatrices);
-
-    // 3. Decrement refcounts for AGI_ animation samplers
-    for (auto idx : agi_indices) {
-        for (const auto& sampler : doc.animations[idx].samplers) {
-            if (sampler.input >= 0) accessor_refcount[sampler.input]--;
-            if (sampler.output >= 0) accessor_refcount[sampler.output]--;
-        }
-    }
-
-    // 4. Collect zero-refcount accessors
-    std::unordered_set<int32_t> removable_accessors;
-    for (const auto& [idx, count] : accessor_refcount) {
-        if (count <= 0) removable_accessors.insert(idx);
-    }
-
-    // 5. Build bufferView refcount from all consumers: accessors (including
-    // their sparse indices/values, which reference bufferViews independently
-    // of the accessor's own bufferView), and images.
-    std::unordered_map<int32_t, int> bv_refcount;
-    for (int32_t i = 0; i < static_cast<int32_t>(doc.accessors.size()); ++i) {
-        const auto& acc = doc.accessors[i];
-        if (acc.bufferView >= 0)
-            bv_refcount[acc.bufferView]++;
-        if (!acc.sparse.empty()) {
-            bv_refcount[static_cast<int32_t>(acc.sparse.indices.bufferView)]++;
-            bv_refcount[static_cast<int32_t>(acc.sparse.values.bufferView)]++;
-        }
-    }
-    for (const auto& image : doc.images) {
-        // Images may reference a bufferView (embedded) or a uri (external/
-        // data-uri). By convention (see fx::gltf's Image::to_json), a
-        // bufferView-backed image has an empty uri; when uri is set,
-        // bufferView is not meaningful even though it defaults to 0.
-        if (image.uri.empty())
-            bv_refcount[image.bufferView]++;
-    }
-    // Decrement for removable accessors
-    for (auto acc_idx : removable_accessors) {
-        if (acc_idx >= 0 && acc_idx < static_cast<int32_t>(doc.accessors.size())) {
-            auto bv = doc.accessors[acc_idx].bufferView;
-            if (bv >= 0) bv_refcount[bv]--;
-        }
-    }
-
-    std::unordered_set<int32_t> removable_bvs;
-    for (const auto& [idx, count] : bv_refcount) {
-        if (count <= 0) removable_bvs.insert(idx);
-    }
-
-    // 6. Build old->new remapping tables
-    std::vector<int32_t> accessor_remap(doc.accessors.size(), -1);
-    {
-        int32_t new_idx = 0;
-        for (int32_t i = 0; i < static_cast<int32_t>(doc.accessors.size()); ++i) {
-            if (removable_accessors.count(i) == 0)
-                accessor_remap[i] = new_idx++;
-        }
-    }
-
-    std::vector<int32_t> bv_remap(doc.bufferViews.size(), -1);
-    {
-        int32_t new_idx = 0;
-        for (int32_t i = 0; i < static_cast<int32_t>(doc.bufferViews.size()); ++i) {
-            if (removable_bvs.count(i) == 0)
-                bv_remap[i] = new_idx++;
-        }
-    }
-
-    // 7. Remove entries (reverse order to keep indices stable)
-    {
-        std::vector<fx::gltf::Accessor> new_accessors;
-        for (int32_t i = 0; i < static_cast<int32_t>(doc.accessors.size()); ++i) {
-            if (removable_accessors.count(i) == 0)
-                new_accessors.push_back(std::move(doc.accessors[i]));
-        }
-        doc.accessors = std::move(new_accessors);
-    }
-    {
-        std::vector<fx::gltf::BufferView> new_bvs;
-        for (int32_t i = 0; i < static_cast<int32_t>(doc.bufferViews.size()); ++i) {
-            if (removable_bvs.count(i) == 0)
-                new_bvs.push_back(std::move(doc.bufferViews[i]));
-        }
-        doc.bufferViews = std::move(new_bvs);
-    }
-
-    // 8. Remap all accessor indices throughout document
-    auto remap_acc = [&](int32_t& idx) {
-        if (idx >= 0 && idx < static_cast<int32_t>(accessor_remap.size()))
-            idx = accessor_remap[idx];
-    };
-    auto remap_acc_u = [&](uint32_t& idx) {
-        auto i = static_cast<int32_t>(idx);
-        if (i >= 0 && i < static_cast<int32_t>(accessor_remap.size()) && accessor_remap[i] >= 0)
-            idx = static_cast<uint32_t>(accessor_remap[i]);
-    };
-    auto remap_bv = [&](int32_t& idx) {
-        if (idx >= 0 && idx < static_cast<int32_t>(bv_remap.size()))
-            idx = bv_remap[idx];
-    };
-
-    // Remap accessor.bufferView, plus sparse indices/values bufferViews
-    for (auto& acc : doc.accessors) {
-        remap_bv(acc.bufferView);
-        if (!acc.sparse.empty()) {
-            auto idx_bv = static_cast<int32_t>(acc.sparse.indices.bufferView);
-            remap_bv(idx_bv);
-            acc.sparse.indices.bufferView = static_cast<uint32_t>(idx_bv);
-
-            auto val_bv = static_cast<int32_t>(acc.sparse.values.bufferView);
-            remap_bv(val_bv);
-            acc.sparse.values.bufferView = static_cast<uint32_t>(val_bv);
-        }
-    }
-
-    // Remap image.bufferView (only meaningful when the image has no uri)
-    for (auto& image : doc.images) {
-        if (image.uri.empty())
-            remap_bv(image.bufferView);
-    }
-
-    // Remap animation sampler accessors (non-AGI only, since AGI are being removed)
-    for (uint32_t i = 0; i < doc.animations.size(); ++i) {
-        if (agi_indices.count(i)) continue;
-        for (auto& sampler : doc.animations[i].samplers) {
-            remap_acc(sampler.input);
-            remap_acc(sampler.output);
-        }
-    }
-
-    // Remap mesh primitive accessors
-    for (auto& mesh : doc.meshes) {
-        for (auto& prim : mesh.primitives) {
-            remap_acc(prim.indices);
-            for (auto& [key, val] : prim.attributes)
-                remap_acc_u(val);
-            for (auto& target : prim.targets)
-                for (auto& [key, val] : target)
-                    remap_acc_u(val);
-        }
-    }
-
-    // Remap skin accessors
-    for (auto& skin : doc.skins)
-        remap_acc(skin.inverseBindMatrices);
-
-    // 9. Remove AGI_ animations (reverse order)
-    std::vector<uint32_t> sorted_agi(agi_indices.begin(), agi_indices.end());
-    std::sort(sorted_agi.rbegin(), sorted_agi.rend());
-    for (auto idx : sorted_agi)
-        doc.animations.erase(doc.animations.begin() + idx);
 }
 
 // ---------------------------------------------------------------------------

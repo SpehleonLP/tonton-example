@@ -187,14 +187,23 @@ int main(int argc, char* argv[])
         // Write extension to document
         ChaChaFxGltf::write_agi_articulations(doc, articulations);
 
-        // Remove AGI_ prefix animations
-        ChaChaFxGltf::remove_agi_animations(doc);
+        // Deliberately NOT removing "AGI " configuration animations from the
+        // output: hand-rolling that compaction (refcount + renumber
+        // accessors/bufferViews) previously shipped a corruption bug for any
+        // document with an embedded image or a sparse accessor (see git
+        // history for the removed remove_agi_animations()). The real
+        // production path, gltfRepackager, never had this problem because it
+        // defers to a proper reference-counting GC (steps/garbage_collect.cpp)
+        // instead of hand-rolling one. Rather than patch this a third time,
+        // this example simply leaves the AGI animation(s) in the written
+        // file; they're harmless there, just redundant with the
+        // AGI_articulations extension now written alongside them.
 
         // Optionally strip all animations
         if (result.count("strip-animations")) {
             doc.animations.clear();
             // Note: we don't clean up orphaned accessors/bufferViews here
-            // as that would require a full document walk similar to remove_agi_animations
+            // as that would require a full document walk similar to a GC pass.
         }
 
         // Save

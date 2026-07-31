@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace fx { namespace gltf { struct Document; }}
@@ -31,9 +30,6 @@ struct ExtractedAnimations {
     // Animation descriptors referencing name_storage. Parallel to
     // doc.animations (indexed by AnimationChannel::animation).
     std::vector<ChaCha::Animation> animations;
-
-    // Indices of animations with AGI prefix (for later removal)
-    std::unordered_set<uint32_t> agi_animation_indices;
 
     // `channels` and `animations` hold views into `time_storage`/`value_storage`
     // and `name_storage` respectively, all siblings of this same struct.
@@ -75,13 +71,6 @@ ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc);
 void write_agi_articulations(
     fx::gltf::Document& doc,
     const std::vector<ChaCha::Articulation>& articulations);
-
-// Remove animations whose name starts with "AGI " (case-insensitive, note
-// the space -- authored configuration animations are named things like
-// "AGI Configuration", not "AGI_Configuration").
-// Also removes orphaned accessors and bufferViews via reference counting,
-// with full index remapping across the document.
-void remove_agi_animations(fx::gltf::Document& doc);
 
 // Check if the document already has AGI_articulations extension.
 bool has_agi_articulations(const fx::gltf::Document& doc);
