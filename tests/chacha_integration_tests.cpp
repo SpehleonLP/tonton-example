@@ -11,6 +11,7 @@
 #include "chacha_fxgltf_bridge.h"
 #include <nlohmann/json.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -218,10 +219,20 @@ TEST(ChaChaIntegration, ScorpionAnalysis)
     std::printf("[scorpion] dof histogram 0/1/2/3 = %d/%d/%d/%d\n",
                 hist[0], hist[1], hist[2], hist[3]);
     // Measured baseline (see task-15 report): 11 one-DOF, 16 two-DOF,
-    // 18 three-DOF. This is what actually exercises the reduced-DOF search
-    // path (11+16 = 27 of 45 articulations went through the 1-DOF/2-DOF
-    // candidate solve and residual gate, not just the always-exact 3-DOF
-    // chart fit).
+    // 18 three-DOF. Correction: this does NOT exercise select_candidate's
+    // reduced-DOF search or its residual acceptance gate (chacha_reduced.cpp
+    // / chacha_search.cpp). Scorpion's motion comes from its "AGI
+    // Configuration" / "AGI Configuration.001" animation pair, so every one
+    // of these 45 articulations -- including the 11 one-DOF and 16 two-DOF
+    // results -- is produced by solve_configuration (chacha_config.cpp),
+    // which reads dof_count directly off how many distinct axes the artist's
+    // authored phases touched. That path never calls select_candidate. This
+    // histogram is still useful evidence that reduced-DOF *output* (dof_count
+    // < 3) is common and correctly reported, but it says nothing about the
+    // search/candidate-solve/residual-gate path in chacha_search.cpp and
+    // chacha_reduced.cpp, which has no real-data coverage in this suite (see
+    // SophiaAnalysis's dof histogram comment) and is exercised only by
+    // ChaCha's own synthetic unit tests.
     EXPECT_EQ(hist[0], 0);
     EXPECT_EQ(hist[1], 11);
     EXPECT_EQ(hist[2], 16);
@@ -527,4 +538,51 @@ TEST(ChaChaIntegration, ScaleStageIsBareRatioNotDegrees)
                "conversion";
     }
     ASSERT_TRUE(found) << "no yScale stage found in written AGI JSON";
+}
+
+// ---------------------------------------------------------------------------
+// Performance guard: catch a silent order-of-magnitude regression in
+// analyze(), not small drift.
+//
+// The search is 49 joints x 12 charts x 88 animations x ~157 frames on this
+// model (select_candidate additionally evaluates 3 one-DOF and 6 two-DOF
+// candidates per joint, all scaling the same way -- see chacha_search.cpp).
+//
+// Measured (this task, RelWithDebInfo, the CMakeLists.txt default build
+// type): three consecutive runs of analyze() alone on sophia-2_9.glb gave
+// 19452 ms, 19732 ms, 20018 ms -- a ~3% spread. 120000 ms is chosen as the
+// bound: ~6x the measured ceiling. That is loose by design. A prior
+// measurement in this rework found an UNOPTIMISED (Debug-equivalent) build
+// of the same workload lands at essentially exactly 120000 ms, i.e. a tight
+// bound here would make "someone built this in Debug" indistinguishable from
+// "the algorithm regressed" -- which is exactly the false positive
+// CMakeLists.txt's default-to-RelWithDebInfo was introduced to avoid this
+// test tripping over. A bound six times looser than the measured
+// RelWithDebInfo ceiling still catches a genuine order-of-magnitude
+// regression (e.g. an accidentally-quadratic change to the per-joint search,
+// or losing the RelWithDebInfo optimization default) while leaving headroom
+// for a slower CI machine.
+//
+// Honesty check performed while writing this test (not left in committed
+// form): temporarily lowering the bound to 10000 ms made this test fail as
+// expected against the same unmodified build (measured ~19.5-20s), and
+// restoring 120000 ms passed again -- so the assertion mechanics are known
+// to be able to fail, not just habitually true. What is NOT verified is a
+// realistic regression scenario (an actual Debug build or an actual
+// algorithmic slowdown) tripping this exact 120000 ms line; treat this as a
+// catastrophic-regression guard, not a tuned performance regression test.
+TEST(ChaChaIntegration, SophiaAnalysisCompletesInReasonableTime)
+{
+    auto doc   = load("sophia-2_9.glb");
+    auto anims = ChaChaFxGltf::extract_animation_channels(doc);
+    auto skel  = ChaChaFxGltf::extract_skeleton(doc);
+
+    const auto start = std::chrono::steady_clock::now();
+    auto arts = ChaCha::analyze(anims.channels, anims.animations, skel.as_skeleton());
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    std::printf("[sophia] analyze() took %lld ms for %zu articulations\n",
+                static_cast<long long>(elapsed), arts.size());
+    EXPECT_LT(elapsed, 120000);
 }
