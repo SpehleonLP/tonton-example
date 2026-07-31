@@ -454,11 +454,26 @@ void remove_agi_animations(fx::gltf::Document& doc)
         if (count <= 0) removable_accessors.insert(idx);
     }
 
-    // 5. Build bufferView refcount from all accessors
+    // 5. Build bufferView refcount from all consumers: accessors (including
+    // their sparse indices/values, which reference bufferViews independently
+    // of the accessor's own bufferView), and images.
     std::unordered_map<int32_t, int> bv_refcount;
     for (int32_t i = 0; i < static_cast<int32_t>(doc.accessors.size()); ++i) {
-        if (doc.accessors[i].bufferView >= 0)
-            bv_refcount[doc.accessors[i].bufferView]++;
+        const auto& acc = doc.accessors[i];
+        if (acc.bufferView >= 0)
+            bv_refcount[acc.bufferView]++;
+        if (!acc.sparse.empty()) {
+            bv_refcount[static_cast<int32_t>(acc.sparse.indices.bufferView)]++;
+            bv_refcount[static_cast<int32_t>(acc.sparse.values.bufferView)]++;
+        }
+    }
+    for (const auto& image : doc.images) {
+        // Images may reference a bufferView (embedded) or a uri (external/
+        // data-uri). By convention (see fx::gltf's Image::to_json), a
+        // bufferView-backed image has an empty uri; when uri is set,
+        // bufferView is not meaningful even though it defaults to 0.
+        if (image.uri.empty())
+            bv_refcount[image.bufferView]++;
     }
     // Decrement for removable accessors
     for (auto acc_idx : removable_accessors) {
@@ -525,9 +540,25 @@ void remove_agi_animations(fx::gltf::Document& doc)
             idx = bv_remap[idx];
     };
 
-    // Remap accessor.bufferView
-    for (auto& acc : doc.accessors)
+    // Remap accessor.bufferView, plus sparse indices/values bufferViews
+    for (auto& acc : doc.accessors) {
         remap_bv(acc.bufferView);
+        if (!acc.sparse.empty()) {
+            auto idx_bv = static_cast<int32_t>(acc.sparse.indices.bufferView);
+            remap_bv(idx_bv);
+            acc.sparse.indices.bufferView = static_cast<uint32_t>(idx_bv);
+
+            auto val_bv = static_cast<int32_t>(acc.sparse.values.bufferView);
+            remap_bv(val_bv);
+            acc.sparse.values.bufferView = static_cast<uint32_t>(val_bv);
+        }
+    }
+
+    // Remap image.bufferView (only meaningful when the image has no uri)
+    for (auto& image : doc.images) {
+        if (image.uri.empty())
+            remap_bv(image.bufferView);
+    }
 
     // Remap animation sampler accessors (non-AGI only, since AGI are being removed)
     for (uint32_t i = 0; i < doc.animations.size(); ++i) {
