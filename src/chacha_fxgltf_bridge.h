@@ -34,6 +34,20 @@ struct ExtractedAnimations {
 
     // Indices of animations with AGI prefix (for later removal)
     std::unordered_set<uint32_t> agi_animation_indices;
+
+    // `channels` and `animations` hold views into `time_storage`/`value_storage`
+    // and `name_storage` respectively, all siblings of this same struct.
+    // Moving is safe (the moved-from vectors' storage pointers transfer along
+    // with the struct, so every view stays valid). Copying is NOT: a copy's
+    // views would keep pointing at the ORIGINAL's storage, not its own copied
+    // vectors, which is silently correct until the original is destroyed and
+    // then a use-after-free. Delete copy so that's a compile error, not a
+    // latent bug waiting for someone to write `auto b = a;`.
+    ExtractedAnimations() = default;
+    ExtractedAnimations(const ExtractedAnimations&) = delete;
+    ExtractedAnimations& operator=(const ExtractedAnimations&) = delete;
+    ExtractedAnimations(ExtractedAnimations&&) = default;
+    ExtractedAnimations& operator=(ExtractedAnimations&&) = default;
 };
 
 struct ExtractedSkeleton {

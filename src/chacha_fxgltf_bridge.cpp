@@ -9,6 +9,39 @@
 #include <iostream>
 #include <unordered_map>
 
+// Component/element byte sizes, needed to bounds-check the byte EXTENT an
+// accessor claims -- not just the index chain into bufferView/buffer.
+static uint32_t accessor_component_size(fx::gltf::Accessor::ComponentType t)
+{
+    switch (t) {
+    case fx::gltf::Accessor::ComponentType::Byte:
+    case fx::gltf::Accessor::ComponentType::UnsignedByte:
+        return 1;
+    case fx::gltf::Accessor::ComponentType::Short:
+    case fx::gltf::Accessor::ComponentType::UnsignedShort:
+        return 2;
+    case fx::gltf::Accessor::ComponentType::UnsignedInt:
+    case fx::gltf::Accessor::ComponentType::Float:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t accessor_component_count(fx::gltf::Accessor::Type t)
+{
+    switch (t) {
+    case fx::gltf::Accessor::Type::Scalar: return 1;
+    case fx::gltf::Accessor::Type::Vec2:   return 2;
+    case fx::gltf::Accessor::Type::Vec3:   return 3;
+    case fx::gltf::Accessor::Type::Vec4:   return 4;
+    case fx::gltf::Accessor::Type::Mat2:   return 4;
+    case fx::gltf::Accessor::Type::Mat3:   return 9;
+    case fx::gltf::Accessor::Type::Mat4:   return 16;
+    default: return 0;
+    }
+}
+
 // Lightweight accessor data navigator (same pattern as RTT::AccessorData
 // but without rintintin dependency)
 struct AccessorData {
@@ -19,14 +52,45 @@ struct AccessorData {
     AccessorData(const fx::gltf::Document& doc, int32_t accessorIdx) {
         if (accessorIdx < 0 || accessorIdx >= static_cast<int32_t>(doc.accessors.size()))
             return;
-        accessor = &doc.accessors[accessorIdx];
-        if (accessor->bufferView < 0 || accessor->bufferView >= static_cast<int32_t>(doc.bufferViews.size()))
+        const auto* acc = &doc.accessors[accessorIdx];
+        if (acc->bufferView < 0 || acc->bufferView >= static_cast<int32_t>(doc.bufferViews.size()))
             return;
-        bufferView = &doc.bufferViews[accessor->bufferView];
-        if (bufferView->buffer < 0 || bufferView->buffer >= static_cast<int32_t>(doc.buffers.size()))
+        const auto* bv = &doc.bufferViews[acc->bufferView];
+        if (bv->buffer < 0 || bv->buffer >= static_cast<int32_t>(doc.buffers.size()))
             return;
-        const auto& buffer = doc.buffers[bufferView->buffer];
-        data = buffer.data.data() + bufferView->byteOffset + accessor->byteOffset;
+        const auto& buffer = doc.buffers[bv->buffer];
+
+        // This bridge only ever reads accessor data as raw float arrays (see the
+        // reinterpret_cast<const float*> call sites below) -- a non-Float
+        // accessor would silently be reinterpreted as float data, so reject it
+        // here rather than trust the caller's assumption downstream.
+        if (acc->componentType != fx::gltf::Accessor::ComponentType::Float)
+            return;
+
+        const uint32_t comp_size = accessor_component_size(acc->componentType);
+        const uint32_t num_comp  = accessor_component_count(acc->type);
+        if (comp_size == 0 || num_comp == 0)
+            return;
+        const uint32_t element_size = comp_size * num_comp;
+        const uint32_t stride = bv->byteStride != 0 ? bv->byteStride : element_size;
+
+        // Byte-extent check: verify byteOffset + count*stride (the last
+        // element's end) actually fits within the buffer. The earlier checks
+        // above only validate the accessor -> bufferView -> buffer INDEX
+        // chain; a crafted or corrupt accessor.count/byteOffset can still
+        // overrun the buffer's actual byte length, which the index chain
+        // alone can't catch.
+        const uint64_t base_offset =
+            static_cast<uint64_t>(bv->byteOffset) + acc->byteOffset;
+        uint64_t required = base_offset;
+        if (acc->count > 0)
+            required += static_cast<uint64_t>(acc->count - 1) * stride + element_size;
+        if (required > buffer.data.size())
+            return;
+
+        accessor = acc;
+        bufferView = bv;
+        data = buffer.data.data() + base_offset;
     }
 
     bool isValid() const { return accessor && bufferView && data; }
@@ -126,6 +190,20 @@ ExtractedAnimations extract_animation_channels(const fx::gltf::Document& doc)
             } else {
                 total_values = key_count * values_per_key;
             }
+
+            // total_values is derived from the TIME accessor's count and the
+            // channel's target path, not from the value accessor's own
+            // metadata -- AccessorData already verified value_data.accessor's
+            // OWN declared count/type fit the buffer, but a malformed file
+            // could still declare a time accessor with a larger count than
+            // the paired value accessor actually holds. Re-derive the value
+            // accessor's own safe element budget and refuse to read past it.
+            const uint32_t value_num_comp = accessor_component_count(value_data.accessor->type);
+            const uint64_t value_budget =
+                static_cast<uint64_t>(value_data.accessor->count) * value_num_comp;
+            if (value_num_comp == 0 || total_values > value_budget)
+                continue;
+
             result.value_storage.emplace_back(value_ptr, value_ptr + total_values);
 
             ChaCha::AnimationChannel ch;
@@ -157,7 +235,8 @@ ExtractedSkeleton extract_skeleton(const fx::gltf::Document& doc)
 
     for (size_t i = 0; i < n; ++i)
         for (auto child : doc.nodes[i].children)
-            if (child < n) result.parents[child] = static_cast<int>(i);
+            if (child >= 0 && static_cast<size_t>(child) < n)
+                result.parents[child] = static_cast<int>(i);
 
     // Extract rest poses from node-local TRS.
     // Animation channels store local-space values, so rest poses must also
@@ -217,6 +296,13 @@ static const char* stage_type_to_agi_type(ChaCha::StageType type)
     case ChaCha::StageType::xScale:     return "xScale";
     case ChaCha::StageType::yScale:     return "yScale";
     case ChaCha::StageType::zScale:     return "zScale";
+    case ChaCha::StageType::Invalid:
+        // Never a valid AGI type. Callers must not reach here -- both
+        // write_agi_articulations and print_articulations_json skip any
+        // stage whose type falls outside [0, kStageTypeCount) before calling
+        // this function. Handled explicitly (rather than via fallthrough)
+        // so -Wswitch stays exhaustive and documents the sentinel.
+        break;
     }
     return "unknown";
 }
@@ -229,6 +315,13 @@ static bool is_rotation_stage(ChaCha::StageType type)
 }
 
 static constexpr float rad_to_deg = 180.0f / 3.14159265358979323846f;
+
+// Number of real (emittable) StageType values -- excludes the StageType::Invalid
+// sentinel, which analyze() contractually never emits on a real Stage. `occurrence`
+// arrays below are sized to this and slots outside [0, kStageTypeCount) are skipped
+// rather than indexed, so a stray Invalid (or any future out-of-range value) cannot
+// write past the array.
+static constexpr int kStageTypeCount = 9;
 
 void write_agi_articulations(
     fx::gltf::Document& doc,
@@ -249,10 +342,19 @@ void write_agi_articulations(
         // slot rather than deduplicating by type, and preserve slot order
         // exactly since AGI applies stages in order of appearance.
         nlohmann::json stages_json = nlohmann::json::array();
-        int occurrence[9] = {0,0,0,0,0,0,0,0,0};
+        int occurrence[kStageTypeCount] = {};
 
         for (const auto& stage : artic.stages) {
-            const int   slot  = static_cast<int>(stage.type);
+            const int slot = static_cast<int>(stage.type);
+            if (slot < 0 || slot >= kStageTypeCount) {
+                // StageType::Invalid (or any other out-of-range value) must never
+                // reach AGI output -- it has no valid AGI type string and would
+                // index past `occurrence`. analyze() contractually never emits
+                // this on a real Stage; skip defensively rather than trust that.
+                std::cerr << "warning: skipping stage with invalid type " << slot
+                          << " on articulation \"" << name << "\"\n";
+                continue;
+            }
             const int   occur = occurrence[slot]++;
             const float conv  = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
 
@@ -496,10 +598,15 @@ void print_articulations_json(
         entry["node"] = artic.node;
 
         nlohmann::json stages_json = nlohmann::json::array();
-        int occurrence[9] = {0,0,0,0,0,0,0,0,0};
+        int occurrence[kStageTypeCount] = {};
 
         for (const auto& stage : artic.stages) {
-            const int   slot  = static_cast<int>(stage.type);
+            const int slot = static_cast<int>(stage.type);
+            if (slot < 0 || slot >= kStageTypeCount) {
+                std::cerr << "warning: skipping stage with invalid type " << slot
+                          << " on articulation \"" << name << "\"\n";
+                continue;
+            }
             const int   occur = occurrence[slot]++;
             const float conv  = is_rotation_stage(stage.type) ? rad_to_deg : 1.0f;
 

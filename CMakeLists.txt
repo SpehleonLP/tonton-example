@@ -133,6 +133,14 @@ target_include_directories(chacha-example PRIVATE
     ${CMAKE_SOURCE_DIR}/modules/cxxopts/include
 )
 
+# -Wswitch (part of -Wall) would have caught the incomplete StageType switch
+# in chacha_fxgltf_bridge.cpp (missing StageType::Invalid) at compile time
+# instead of only at review. Scoped to this target rather than project-wide
+# since the rest of the build isn't warning-clean and that's a separate cleanup.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(chacha-example PRIVATE -Wall -Wextra)
+endif()
+
 target_link_libraries(chacha-example PRIVATE
     chacha
     fx-gltf
