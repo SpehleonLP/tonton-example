@@ -11,10 +11,13 @@
 #include <span>
 
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <limits>
 
 bool OpenFile(fx::gltf::Document & doc, std::filesystem::path const& path);
 void SaveFile(fx::gltf::Document & doc, std::filesystem::path const& path);
-void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src);
+void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src, bool compare_centroids);
 
 enum class RttErrorCode;
 
@@ -27,6 +30,7 @@ struct Arguments
 	std::filesystem::path input;
 	std::filesystem::path output;
 	std::filesystem::path tensors;
+	bool compare_centroids{};
 };
 
 std::vector<Arguments> GetArguments(int argc, const char * args[])
@@ -45,6 +49,12 @@ std::vector<Arguments> GetArguments(int argc, const char * args[])
 			if(state == 'v')
 			{
 				read.tensors = (std::string(read.input) += ("-tensors.glb"));
+			}
+			
+			if(state == 'c')
+			{
+				read.compare_centroids = true;
+				state = 0;
 			}
 			
 			continue;
@@ -89,17 +99,23 @@ static void PrintUsage(const char * prog)
 		"rintintin-analyze — per-joint volumetric / second-moment analysis for skinned glTF\n"
 		"\n"
 		"Usage:\n"
-		"  %s [options] <input.glb|input.gltf> [<input2> ...]\n"
+		"  %s <input.glb|input.gltf> [options]\n"
 		"\n"
-		"For each input file, writes:\n"
+		"Writes:\n"
 		"  <input>-output.gltf   skeleton + tensor visualization with LF_RINTINTIN extension\n"
 		"\n"
-		"Options (apply to the input file that follows):\n"
-		"  -o <path>     override output path for the next input\n"
+		"Options (must FOLLOW the input path they apply to):\n"
+		"  -o <path>     override the output path\n"
 		"  -v [<path>]   also emit a tensor-visualization .glb\n"
 		"                no path = <input>-tensors.glb\n"
+		"  -c            solve isolated joints' centroids as well as using their\n"
+		"                joint origin, and report both against the oriented box\n"
 		"\n"
-		"Multiple inputs may be chained; each set of flags applies to the next positional arg.\n"
+		"Options are bound to the preceding input path, so they must come after it:\n"
+		"  %s in.glb -v tensors.glb        writes tensors.glb\n"
+		"  %s -v tensors.glb in.glb        -v is ignored, no tensor file is written\n"
+		"\n"
+		"One input per invocation. Additional positional arguments are not processed.\n"
 		"\n"
 		"Environment variables (debug instrumentation):\n"
 		"  RTT_PROBE_JOINT=<joint_name>\n"
@@ -111,8 +127,11 @@ static void PrintUsage(const char * prog)
 		"      Example:\n"
 		"        RTT_PROBE_JOINT=\"mixamorig:RightHandThumb2\" %s in.glb 2> probe.log\n"
 		"\n"
-		"Exit: 0 on success; per-file errors are logged to stderr and processing continues.\n",
-		prog, prog);
+		"Note: a tensor file is only written when the input contains a skinned mesh\n"
+		"(a node with both a mesh and a skin). Files with no skin produce no tensors.\n"
+		"\n"
+		"Exit: 0 on success; errors are logged to stderr.\n",
+		prog, prog, prog, prog);
 }
 
 int main(int argc,const char * args[])
@@ -144,7 +163,7 @@ int main(int argc,const char * args[])
 			fx::gltf::Document dst;
 			
 			auto _now = std::chrono::high_resolution_clock::now();
-			ProcessFile(dst, doc);
+			ProcessFile(dst, doc, arg.compare_centroids);
 			auto time_taken = std::chrono::high_resolution_clock::now() - _now;
 			auto duration_ms = std::chrono::duration<double, std::milli>(time_taken);
 			std::cout << "processed in: " << duration_ms.count() << "ms\n";
@@ -230,19 +249,120 @@ void SaveFile(fx::gltf::Document & doc, std::filesystem::path const& path)
 };
 
 
-void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintintin_skin & skin, rintintin_metrics * metrics);
+void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintintin_skin & skin, rintintin_metrics * metrics, glm::mat4 const& world);
 
-void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
+namespace {
+
+glm::mat4 LocalMatrix(fx::gltf::Node const& n)
+{
+	// fx-gltf defaults `matrix` to identity, so a non-identity matrix means the
+	// file used the matrix form; otherwise compose TRS.
+	if(n.matrix != fx::gltf::defaults::IdentityMatrix)
+		return glm::make_mat4(n.matrix.data());
+
+	glm::mat4 t = glm::translate(glm::mat4(1.0f),
+		glm::vec3(n.translation[0], n.translation[1], n.translation[2]));
+	glm::mat4 r = glm::mat4_cast(
+		glm::quat(n.rotation[3], n.rotation[0], n.rotation[1], n.rotation[2]));
+	glm::mat4 s = glm::scale(glm::mat4(1.0f),
+		glm::vec3(n.scale[0], n.scale[1], n.scale[2]));
+
+	return t * r * s;
+}
+
+// Tensors come out of rintintin in the mesh node's local space, but the object
+// is drawn under that node's world transform -- without this the visualization
+// sits at the origin, rotated by whatever the exporter's up-axis fix was, and
+// can't be eyeballed against the source.
+glm::mat4 WorldMatrix(fx::gltf::Document const& doc, uint32_t node)
+{
+	std::vector<int32_t> parent(doc.nodes.size(), -1);
+	for(uint32_t i = 0; i < doc.nodes.size(); ++i)
+		for(auto c : doc.nodes[i].children)
+			if(uint32_t(c) < parent.size())
+				parent[c] = int32_t(i);
+
+	glm::mat4 m(1.0f);
+	for(int32_t j = int32_t(node), guard = 0;
+	    j >= 0 && guard <= int32_t(doc.nodes.size());
+	    j = parent[j], ++guard)
+	{
+		m = LocalMatrix(doc.nodes[j]) * m;
+	}
+
+	return m;
+}
+
+// Seed for a synthetic joint. These meshes are non-manifold, so the volume
+// integral is origin-dependent -- an arbitrary joint at the mesh origin makes
+// the measurement depend on where the artist happened to place that origin, and
+// identical geometry at different offsets then measures differently. The bounds
+// centre travels with the geometry, so congruent parts agree.
+rintintin_vec3 MeshBoundsCentre(fx::gltf::Document const& doc, fx::gltf::Mesh const& mesh)
+{
+	glm::dvec3 lo(std::numeric_limits<double>::max());
+	glm::dvec3 hi(std::numeric_limits<double>::lowest());
+	bool any = false;
+
+	for(auto const& prim : mesh.primitives)
+	{
+		auto it = prim.attributes.find("POSITION");
+		if(it == prim.attributes.end()) continue;
+		if(uint32_t(it->second) >= doc.accessors.size()) continue;
+
+		auto const& acc = doc.accessors[it->second];
+		if(acc.min.size() < 3 || acc.max.size() < 3) continue;
+
+		for(int k = 0; k < 3; ++k)
+		{
+			lo[k] = std::min(lo[k], double(acc.min[k]));
+			hi[k] = std::max(hi[k], double(acc.max[k]));
+		}
+		any = true;
+	}
+
+	if(!any) return {0, 0, 0};
+
+	glm::dvec3 c = (lo + hi) * 0.5;
+	return {c.x, c.y, c.z};
+}
+
+// Score a candidate centroid against the joint's oriented bounding box, which is
+// derived from vertex extents (argmax-cluster PCA) rather than from the mass
+// distribution -- so it is an independent opinion about where the body is.
+// Returns the largest per-axis overshoot in OBB half-extents: <= 1 is inside.
+double ObbOvershoot(rintintin_inertia_estimation const& obb, rintintin_vec3 const& c)
+{
+	glm::dquat q(obb.rotation.w, obb.rotation.x, obb.rotation.y, obb.rotation.z);
+	glm::dvec3 d(c.x - obb.translation.x, c.y - obb.translation.y, c.z - obb.translation.z);
+	glm::dvec3 local = glm::inverse(q) * d;
+	glm::dvec3 half(obb.scale.x, obb.scale.y, obb.scale.z);
+
+	double worst = 0;
+	for(int k = 0; k < 3; ++k)
+	{
+		double h = std::abs(half[k]);
+		if(h <= 0) continue;
+		worst = std::max(worst, std::abs(local[k]) / h);
+	}
+	return worst;
+}
+
+} // anonymous namespace
+
+void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src, bool compare_centroids)
 {
 	using attrib_t = decltype(RintintinMeshData::attributes);	
 		
 	for(auto i = 0u; i < src.nodes.size(); ++i)
 	{
-		if(uint32_t(src.nodes[i].skin) >= src.skins.size()
-		|| uint32_t(src.nodes[i].mesh) >= src.meshes.size())
+		if(uint32_t(src.nodes[i].mesh) >= src.meshes.size())
 			continue;
 			
-	//	if(src.nodes[i].mesh != 3) continue; 
+		// A node with a mesh but no skin still has a tensor worth measuring --
+		// give it a synthetic one-joint skin so a static prop (a ball, a crystal)
+		// reports one whole-body tensor instead of being skipped silently.
+		const bool has_skin = uint32_t(src.nodes[i].skin) < src.skins.size();
 			
 		auto & mesh = src.meshes[src.nodes[i].mesh];
 		std::vector<rintintin_mesh> meshes;
@@ -252,17 +372,24 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 		
 		for(auto & primitive : mesh.primitives)
 		{
-			bool is_alpha_card{};
-			auto m = createRintintinMeshFromPrimitive(src, primitive, &is_alpha_card);
+			ThinShellInfo thin_shell{};
+			auto m = createRintintinMeshFromPrimitive(src, primitive, &thin_shell, !has_skin);
 			
-		//	if(!is_alpha_card)
-			{
-				meshes.push_back(std::move(m.mesh));
-				attributes.push_back(std::move(m.attributes));
-			}
+			if(thin_shell.reason != ThinShellReason::None)
+				std::cerr << "[rtt-shell] " << src.nodes[i].name
+					<< " prim " << meshes.size() << ": "
+					<< (thin_shell.thin ? "thin shell" : "solid") << " ("
+					<< ToString(thin_shell.reason) << ")"
+					<< (thin_shell.thin ? ", thickness " + std::to_string(thin_shell.thickness) + "m" : "")
+					<< "\n";
+			
+			meshes.push_back(std::move(m.mesh));
+			attributes.push_back(std::move(m.attributes));
 		}
 				
-		auto skin = createRintintinSkinFromSkin(src, src.nodes[i].skin);
+		auto skin = has_skin
+			? createRintintinSkinFromSkin(src, src.nodes[i].skin)
+			: createSyntheticSingleJointSkin(src.nodes[i].name, MeshBoundsCentre(src, mesh));
 		std::vector<rintintin_metrics> metrics(skin.skin.no_joints);
 
 		// [rtt-vprobe] Dump per-vertex weights touching a target joint.
@@ -313,7 +440,7 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 		}
 		
 		std::vector<uint8_t> scratch_space;
-		rintintin_process_command cmd;
+		rintintin_process_command cmd{};
 		
 		// single threaded
 		cmd.meshes = meshes.data();
@@ -339,13 +466,13 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 		ec = rintintin_end(&cmd);
 		if(ec < 0) throw RttErrorCode(ec);
 
-		VisualizeInertia(dst, src.nodes[i].name, cmd.skin, cmd.results);
+		VisualizeInertia(dst, src.nodes[i].name, cmd.skin, cmd.results, WorldMatrix(src, i));
 		
 		std::vector<rintintin_inertia_estimation> bounds;	
 	
 		bounds.resize(cmd.skin.no_joints);
 		
-		rintintin_bounding_box_command b_cmd;
+		rintintin_bounding_box_command b_cmd{};
 		b_cmd.meshes = cmd.meshes;
 		b_cmd.metrics = cmd.results;
 		
@@ -355,8 +482,52 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 		b_cmd.no_meshes = cmd.no_meshes;
 		b_cmd.result_byte_length = sizeof(bounds[0]) * bounds.size();
 		
+		// Scratch enables argmax-cluster PCA; without it the OBB rotation comes
+		// from second_moment, which is skinning-weighted and so disagrees with
+		// the argmax extents pass. Matches gltfRepackager's bridge.
+		std::vector<uint8_t> obb_scratch(rintintin_oriented_bounding_boxes_scratch_size(cmd.skin.no_joints));
+		b_cmd.scratch_space = obb_scratch.data();
+		b_cmd.scratch_space_byte_length = uint32_t(obb_scratch.size());
+		
 		ec = rintintin_oriented_bounding_boxes(&b_cmd);
 		if(ec < 0) throw RttErrorCode(ec);
+		
+		if(compare_centroids)
+		{
+			// The mesh has already been read; only the solve is repeated. end()
+			// accumulates into results, so they must be re-zeroed first.
+			std::vector<rintintin_metrics> solved(skin.skin.no_joints);
+			cmd.results = solved.data();
+			cmd.flags   = RINTINTIN_SOLVE_CENTROIDS;
+			
+			auto ec2 = rintintin_end(&cmd);
+			cmd.results = metrics.data();
+			cmd.flags   = 0;
+			
+			if(ec2 < 0)
+			{
+				std::cerr << "[rtt-solve] " << src.nodes[i].name << ": second solve failed: "
+					<< rintintin_get_error_string(int(ec2)) << "\n";
+			}
+			else for(auto j = 0u; j < skin.skin.no_joints; ++j)
+			{
+				bool isolated = skin.skin.parents[j] < 0;
+				for(auto k = 0u; k < skin.skin.no_joints && isolated; ++k)
+					if(skin.skin.parents[k] == int(j)) isolated = false;
+				if(!isolated) continue;
+				
+				auto const& a = metrics[j];
+				auto const& b = solved[j];
+				std::cerr << "[rtt-solve] " << src.nodes[i].name << " joint "
+					<< (skin.skin.bone_names ? skin.skin.bone_names[j] : "?") << "\n"
+					<< "    joint-origin  vol " << a.volume
+					<< "  centroid (" << a.centroid.x << ", " << a.centroid.y << ", " << a.centroid.z << ")"
+					<< "  obb " << ObbOvershoot(bounds[j], a.centroid) << "\n"
+					<< "    solved-centre vol " << b.volume
+					<< "  centroid (" << b.centroid.x << ", " << b.centroid.y << ", " << b.centroid.z << ")"
+					<< "  obb " << ObbOvershoot(bounds[j], b.centroid) << "\n";
+			}
+		}
 		
 		LF::RinTinTin extension;
 		
@@ -375,7 +546,7 @@ void ProcessFile(fx::gltf::Document & dst, fx::gltf::Document & src)
 	}
 }
 
-void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintintin_skin & skin,  rintintin_metrics * metrics)
+void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintintin_skin & skin,  rintintin_metrics * metrics, glm::mat4 const& world)
 {
 	if(doc.buffers.empty())
 	{
@@ -410,7 +581,9 @@ void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintint
 	// Create nodes
 	auto begin = doc.nodes.size();
 	doc.nodes.resize(doc.nodes.size() + skin.no_joints * 2 + 1);
-	doc.nodes.back().name = name;
+	auto container = doc.nodes.size() - 1;
+	doc.nodes[container].name = name;
+	std::memcpy(doc.nodes[container].matrix.data(), glm::value_ptr(world), sizeof(float) * 16);
     
 	// Create aligned spans starting from the skeleton nodes
 	auto skeleton_nodes = std::span{doc.nodes}.subspan(begin, skin.no_joints);
@@ -436,7 +609,7 @@ void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintint
 			
 		// Handle parent-child relationships
 		if(parent_idx < 0) {
-			doc.nodes.back().children.push_back(begin + i);
+			doc.nodes[container].children.push_back(begin + i);
 		} else {
 			const auto& parent_pos = joint_translations[parent_idx];
 			skeleton_nodes[parent_idx].children.push_back(begin + i);
@@ -479,12 +652,14 @@ void VisualizeInertia(fx::gltf::Document & doc, std::string const& name, rintint
 			};
 	}
     
-	// Create scene and add root nodes
-	doc.scenes.push_back({});
-	doc.scenes.back().name = name;
+	// One scene holding every mesh's container. A scene per call left a
+	// multi-mesh model showing only whichever one `doc.scene` pointed at.
+	if(doc.scenes.empty())
+	{
+		doc.scenes.push_back({});
+		doc.scenes.back().name = "tensors";
+	}
 	doc.scene = 0;
     
-	for(auto i = 0u; i < skeleton_nodes.size(); ++i) {
-		doc.scenes.back().nodes.push_back(begin + i);
-	}
+	doc.scenes.front().nodes.push_back(container);
 }

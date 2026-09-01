@@ -106,9 +106,133 @@ rintintin_geometry_type gltfToRinTinTinGeometry(fx::gltf::Primitive::Mode mode) 
     }
 }
 
+const char * ToString(ThinShellReason reason)
+{
+	switch(reason)
+	{
+	case ThinShellReason::None:           return "none";
+	case ThinShellReason::MaterialExtras: return "material extras LF_THIN_SHELL";
+	case ThinShellReason::MaterialName:   return "material name suffix";
+	case ThinShellReason::AlphaHeuristic: return "alphaMode + doubleSided";
+	case ThinShellReason::MaterialExtrasSolid: return "solid: material extras LF_THIN_SHELL=false";
+	case ThinShellReason::MaterialNameSolid:   return "solid: material name suffix";
+	}
+	return "?";
+}
+
+namespace {
+
+bool NameEndsWith(std::string const& name, std::string_view suffix)
+{
+	if(name.size() < suffix.size()) return false;
+	return std::equal(suffix.rbegin(), suffix.rend(), name.rbegin(),
+		[](char a, char b){ return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); });
+}
+
+// Explicit markers are checked before the alphaMode heuristic: the heuristic is
+// a proxy that also fires on materials authored double-sided-transparent for
+// unrelated reasons, so an explicit marker must be able to out-rank it and be
+// reported as the reason.
+ThinShellInfo ClassifyThinShell(const fx::gltf::Document& document,
+                                const fx::gltf::Primitive& primitive)
+{
+	ThinShellInfo info;
+
+	if(uint32_t(primitive.material) >= document.materials.size())
+		return info;
+
+	auto const& mat = document.materials[primitive.material];
+	auto const& ee  = mat.extensionsAndExtras;
+
+	if(ee.contains("extras"))
+	{
+		auto const& extras = ee["extras"];
+
+		if(extras.contains("LF_SHELL_THICKNESS") && extras["LF_SHELL_THICKNESS"].is_number())
+			info.thickness = extras["LF_SHELL_THICKNESS"].get<double>();
+
+		if(extras.contains("LF_THIN_SHELL"))
+		{
+			auto const& flag = extras["LF_THIN_SHELL"];
+			// Blender writes custom properties as bools or as 0/1 ints. An
+			// explicit value is the author speaking, so it settles the question
+			// either way -- false vetoes the heuristic rather than falling through.
+			if(flag.is_boolean() || flag.is_number())
+			{
+				info.thin = flag.is_boolean() ? flag.get<bool>()
+				                              : flag.get<double>() != 0.0;
+				info.reason = info.thin ? ThinShellReason::MaterialExtras
+				                        : ThinShellReason::MaterialExtrasSolid;
+				return info;
+			}
+		}
+	}
+
+	if(NameEndsWith(mat.name, "_solid"))
+	{
+		info.reason = ThinShellReason::MaterialNameSolid;
+		return info;
+	}
+
+	if(NameEndsWith(mat.name, "_shell") || NameEndsWith(mat.name, "_card"))
+	{
+		info.thin   = true;
+		info.reason = ThinShellReason::MaterialName;
+		return info;
+	}
+
+	if(mat.alphaMode != fx::gltf::Material::AlphaMode::Opaque && mat.doubleSided)
+	{
+		info.thin   = true;
+		info.reason = ThinShellReason::AlphaHeuristic;
+	}
+
+	return info;
+}
+
+// Constant attribute readers for an unskinned mesh: every vertex belongs wholly
+// to joint 0. `layout` is unused; rintintin only requires the callback shape.
+rintintin_error_code read_static_joints(int32_t * dst, uint32_t, void const*)
+{
+	dst[0] = 0; dst[1] = 0; dst[2] = 0; dst[3] = 0;
+	return RINTINTIN_SUCCESS;
+}
+
+rintintin_error_code read_static_weights(double * dst, uint32_t, void const*)
+{
+	dst[0] = 1.0; dst[1] = 0.0; dst[2] = 0.0; dst[3] = 0.0;
+	return RINTINTIN_SUCCESS;
+}
+
+} // anonymous namespace
+
+RintintinSkinData createSyntheticSingleJointSkin(std::string const& name, rintintin_vec3 origin)
+{
+	RintintinSkinData r;
+
+	r.synthetic_name = std::make_unique<std::string>(name.empty() ? "<static>" : name);
+	r.names          = std::make_unique<const char*[]>(1);
+	r.origins        = std::make_unique<rintintin_vec3[]>(1);
+	r.parents        = std::make_unique<int[]>(1);
+
+	r.names[0]   = r.synthetic_name->c_str();
+	r.origins[0] = origin;
+	r.parents[0] = -1;
+
+	r.skin = {};
+	r.skin.bone_names                   = r.names.get();
+	r.skin.joint_translation_mesh_space = r.origins.get();
+	r.skin.parents                      = r.parents.get();
+	r.skin.no_joints                    = 1;
+
+	return r;
+}
+
 RintintinMeshData createRintintinMeshFromPrimitive(
     const fx::gltf::Document& document, 
-    const fx::gltf::Primitive& primitive, bool * is_alpha_card) {
+    const fx::gltf::Primitive& primitive,
+    ThinShellInfo * thin_shell,
+    bool unskinned) {
     
     RintintinMeshData meshData = {};
     
@@ -117,36 +241,56 @@ RintintinMeshData createRintintinMeshFromPrimitive(
     auto jointsIter = primitive.attributes.find("JOINTS_0");
     auto weightsIter = primitive.attributes.find("WEIGHTS_0");
     
-    if (positionIter == primitive.attributes.end() ||
-        jointsIter == primitive.attributes.end() ||
-        weightsIter == primitive.attributes.end()) {
-        throw std::runtime_error("Required vertex attributes (POSITION, JOINTS_0, WEIGHTS_0) not found");
+    if (positionIter == primitive.attributes.end()) {
+        throw std::runtime_error("Required vertex attribute POSITION not found");
+    }
+    
+    if (!unskinned &&
+       (jointsIter == primitive.attributes.end() ||
+        weightsIter == primitive.attributes.end())) {
+        throw std::runtime_error("Required vertex attributes (JOINTS_0, WEIGHTS_0) not found");
     }
     
     // Create attribute data structures
     GLTFAttributeData positionData(&document, positionIter->second);
-    GLTFAttributeData jointsData(&document, jointsIter->second);
-    GLTFAttributeData weightsData(&document, weightsIter->second);
     
-    if (!positionData.isValid() || !jointsData.isValid() || !weightsData.isValid()) {
+    if (!positionData.isValid()) {
         throw std::runtime_error("Invalid vertex attribute data");
     }
     
     // Create rintintin attribute descriptors
     meshData.attributes = std::make_unique<std::array<rintintin_attrib, 3>>();
     (*meshData.attributes)[0] = createRintintinAttrib(positionData);
-	(*meshData.attributes)[1] = createRintintinAttrib(jointsData);
-	(*meshData.attributes)[2] = createRintintinAttrib(weightsData);
 	
     // Set up rintintin mesh structure
     meshData.mesh = {};
     meshData.mesh.position = rintintin_read_attrib_generic_f;
-    meshData.mesh.joints = rintintin_read_attrib_generic_i;
-    meshData.mesh.weights = rintintin_read_attrib_generic_f;
-    
     meshData.mesh.position_user_data = &(*meshData.attributes)[0];
-    meshData.mesh.joints_user_data = &(*meshData.attributes)[1];
-    meshData.mesh.weights_user_data = &(*meshData.attributes)[2];
+    
+    if (unskinned) {
+        meshData.mesh.joints  = read_static_joints;
+        meshData.mesh.weights = read_static_weights;
+        // The readers ignore their layout, but rintintin_mesh.c:205 rejects a
+        // null *_user_data, so point them at the position attrib.
+        meshData.mesh.joints_user_data  = &(*meshData.attributes)[0];
+        meshData.mesh.weights_user_data = &(*meshData.attributes)[0];
+    }
+    else {
+        GLTFAttributeData jointsData(&document, jointsIter->second);
+        GLTFAttributeData weightsData(&document, weightsIter->second);
+        
+        if (!jointsData.isValid() || !weightsData.isValid()) {
+            throw std::runtime_error("Invalid vertex attribute data");
+        }
+        
+        (*meshData.attributes)[1] = createRintintinAttrib(jointsData);
+        (*meshData.attributes)[2] = createRintintinAttrib(weightsData);
+        
+        meshData.mesh.joints = rintintin_read_attrib_generic_i;
+        meshData.mesh.weights = rintintin_read_attrib_generic_f;
+        meshData.mesh.joints_user_data = &(*meshData.attributes)[1];
+        meshData.mesh.weights_user_data = &(*meshData.attributes)[2];
+    }
     
     meshData.mesh.no_verts = positionData.accessor->count;
     meshData.mesh.geometry_type = gltfToRinTinTinGeometry(primitive.mode);
@@ -164,23 +308,14 @@ RintintinMeshData createRintintinMeshFromPrimitive(
         meshData.mesh.no_indices = 0;
     }
     
-    meshData.mesh.surface_mode = RINTINTIN_SURFACE_NORMAL; // Assume front-facing (CCW winding)
-    meshData.mesh.thickness = 0.04 / 1000; // thickness of paper..?
-    bool maybe_alpha_card = false;
+    ThinShellInfo info = ClassifyThinShell(document, primitive);
     
-    if(uint32_t(primitive.material) < document.materials.size())
-    {
-		auto & mat = document.materials[primitive.material];
-		
-		maybe_alpha_card =
-			mat.alphaMode != fx::gltf::Material::AlphaMode::Opaque
-		&&  mat.doubleSided;
-    }
+    meshData.mesh.surface_mode = info.thin
+        ? RINTINTIN_SURFACE_THIN_SHELL
+        : RINTINTIN_SURFACE_NORMAL;      // Assume front-facing (CCW winding)
+    meshData.mesh.thickness = info.thickness;
     
-    if(is_alpha_card) *is_alpha_card = maybe_alpha_card;
-    
-	if(maybe_alpha_card)
-		meshData.mesh.surface_mode = RINTINTIN_SURFACE_THIN_SHELL; // Assume front-facing (CCW winding)
+    if(thin_shell) *thin_shell = info;
     
     return meshData;
 }
@@ -362,7 +497,8 @@ std::shared_ptr<RintintinCommand> RintintinCommand::Factory(fx::gltf::Document c
 		std::vector<rintintin_inertia_estimation> bounds;	
 		
 		std::vector<uint8_t> scratch_space;
-		rintintin_process_command cmd;
+		std::vector<uint8_t> obb_scratch;
+		rintintin_process_command cmd{};
 		
 		// single threaded
 		cmd.meshes = retn->meshes.data();
@@ -391,7 +527,7 @@ std::shared_ptr<RintintinCommand> RintintinCommand::Factory(fx::gltf::Document c
 		{
 			bounds.resize(retn->skin.skin.no_joints);
 			
-			rintintin_bounding_box_command b_cmd;
+			rintintin_bounding_box_command b_cmd{};
 			b_cmd.meshes = cmd.meshes;
 			b_cmd.metrics = cmd.results;
 			
@@ -400,6 +536,13 @@ std::shared_ptr<RintintinCommand> RintintinCommand::Factory(fx::gltf::Document c
 			b_cmd.no_joints = retn->skin.skin.no_joints;
 			b_cmd.no_meshes = cmd.no_meshes;
 			b_cmd.result_byte_length = sizeof(bounds[0]) * bounds.size();
+			
+			// Scratch enables argmax-cluster PCA; without it the OBB rotation comes
+			// from second_moment, which is skinning-weighted and so disagrees with
+			// the argmax extents pass. Matches gltfRepackager's bridge.
+			obb_scratch.resize(rintintin_oriented_bounding_boxes_scratch_size(retn->skin.skin.no_joints));
+			b_cmd.scratch_space = obb_scratch.data();
+			b_cmd.scratch_space_byte_length = uint32_t(obb_scratch.size());
 			
 			ec = rintintin_oriented_bounding_boxes(&b_cmd);
 			if(ec < 0) goto error;
@@ -429,8 +572,8 @@ RintintinCommand::RintintinCommand(fx::gltf::Document const& src, size_t i, std:
 	
 	for(auto & primitive : mesh.primitives)
 	{
-		bool is_alpha_card{};
-		auto m = createRintintinMeshFromPrimitive(src, primitive, &is_alpha_card);
+		ThinShellInfo thin_shell{};
+		auto m = createRintintinMeshFromPrimitive(src, primitive, &thin_shell);
 		
 	//	if(!is_alpha_card)
 		{
@@ -445,7 +588,7 @@ RintintinCommand::RintintinCommand(fx::gltf::Document const& src, size_t i, std:
 
 rintintin_process_command RintintinCommand::GetMeshCommand()
 {
-	rintintin_process_command cmd;
+	rintintin_process_command cmd{};
 	
 	cmd.meshes = meshes.data();
 	cmd.no_meshes = meshes.size();

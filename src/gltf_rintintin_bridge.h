@@ -12,6 +12,29 @@
 namespace fx { namespace gltf { struct Document; struct Primitive; }}
 enum class RttErrorCode;
 
+// Why a primitive was classified as a thin shell, so callers can report which
+// rule fired -- an explicit marker and the alphaMode heuristic mean different
+// things when a model's tensors come out wrong.
+enum class ThinShellReason : uint8_t {
+	None,
+	MaterialExtras,      // material.extras.LF_THIN_SHELL == true
+	MaterialName,        // material name ends in _shell / _card
+	AlphaHeuristic,      // alphaMode != Opaque && doubleSided
+	// Explicit "this is solid" -- vetoes the heuristic. alphaMode BLEND +
+	// doubleSided is often an authoring workaround rather than a statement
+	// about geometry, so an author must be able to say no.
+	MaterialExtrasSolid, // material.extras.LF_THIN_SHELL == false
+	MaterialNameSolid,   // material name ends in _solid
+};
+
+struct ThinShellInfo {
+	bool             thin   = false;
+	ThinShellReason  reason = ThinShellReason::None;
+	double           thickness = 0.04 / 1000;  // metres; overridden by LF_SHELL_THICKNESS
+};
+
+const char * ToString(ThinShellReason reason);
+
 // Create rintintin mesh from glTF primitive
 struct RintintinMeshData {
     rintintin_mesh mesh;
@@ -19,9 +42,14 @@ struct RintintinMeshData {
     std::unique_ptr<std::array<rintintin_attrib, 3>> attributes;
 };
 
+// `unskinned` builds the mesh from POSITION alone, synthesising joint 0 at
+// weight 1.0 for every vertex -- pairs with createSyntheticSingleJointSkin so a
+// static mesh (a ball, a crystal) yields a single whole-body tensor.
 RintintinMeshData createRintintinMeshFromPrimitive(
 		const fx::gltf::Document& document, 
-		const fx::gltf::Primitive& primitive, bool *is_alpha_card);
+		const fx::gltf::Primitive& primitive,
+		ThinShellInfo * thin_shell = nullptr,
+		bool unskinned = false);
     
 struct RintintinSkinData
 {
@@ -29,7 +57,15 @@ struct RintintinSkinData
 	std::unique_ptr<const char*[]> names;
 	std::unique_ptr<rintintin_vec3[]> origins;
 	std::unique_ptr<int[]> parents;
+	// Heap-stored so `names[0]` stays valid across a move (an SSO string would not).
+	std::unique_ptr<std::string> synthetic_name;
 };
+
+// A one-joint skin for nodes with no glTF skin. `origin` is the joint position
+// in mesh space; there is no artist placement to respect here, so the caller
+// picks whatever seed best describes the geometry.
+RintintinSkinData createSyntheticSingleJointSkin(std::string const& name,
+                                                 rintintin_vec3 origin = {0, 0, 0});
 
 RintintinSkinData createRintintinSkinFromSkin(
 		const fx::gltf::Document& document, 
