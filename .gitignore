@@ -47,3 +47,8 @@ CLAUDE.md
 
 # debug information files
 *.dwo
+
+# Qt Creator per-developer session state -- rewritten on every open (IDE
+# version, kit, local build dir). Never the same on two machines.
+*.user
+*.user.*
